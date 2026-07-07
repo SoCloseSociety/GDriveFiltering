@@ -10,10 +10,12 @@ import html
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import csv
+
 from .dedup import find_exact_duplicates
 from .filters import junk_paths
 from .manifest import Manifest
-from .reorganize import category_for, reorganize
+from .reorganize import _dest_rel, category_for, reorganize
 
 GB = 1024 ** 3
 MB = 1024 ** 2
@@ -70,6 +72,43 @@ def build_proposal(backup_dir: Path, manifest: Manifest) -> Proposal:
     p.dupe_files = len(dup_rel)
     p.dupe_reclaim = sum(by_path[r].size for r in dup_rel if r in by_path)
     return p
+
+
+def build_plan(manifest: Manifest, by_year: bool = True) -> list[dict]:
+    """Editable reorganization plan: one row per file with a default action and
+    destination. The user can edit the CSV (change dest_rel, set action to
+    keep/quarantine/skip) and apply it with `reorganize --plan`."""
+    entries = manifest.done_entries()
+    dedup = find_exact_duplicates(manifest)
+    junk = junk_paths(entries)
+    dup_rel = {p for g in dedup.groups for p in g.duplicates if p not in junk}
+    rows: list[dict] = []
+    for e in entries:
+        if e.rel_path in junk:
+            rows.append({"action": "quarantine", "src_rel": e.rel_path,
+                         "dest_rel": f"_quarantine/junk/{Path(e.rel_path).name}",
+                         "reason": junk[e.rel_path]})
+        elif e.rel_path in dup_rel:
+            rows.append({"action": "quarantine", "src_rel": e.rel_path,
+                         "dest_rel": f"_quarantine/duplicates/{Path(e.rel_path).name}",
+                         "reason": "doublon exact"})
+        else:
+            rows.append({"action": "keep", "src_rel": e.rel_path,
+                         "dest_rel": _dest_rel(e, by_year), "reason": ""})
+    return rows
+
+
+def write_plan_csv(rows: list[dict], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["action", "src_rel", "dest_rel", "reason"])
+        w.writeheader()
+        w.writerows(rows)
+
+
+def read_plan_csv(path: Path) -> list[dict]:
+    with open(path, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
 
 
 def render_text(p: Proposal) -> str:

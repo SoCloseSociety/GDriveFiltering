@@ -80,19 +80,41 @@ def _unique(dest_root: Path, rel: str, sha: str, taken: set[str]) -> str:
     return candidate
 
 
+def _safe_plan_dest(dest_rel: str) -> str:
+    """A user-edited plan destination must stay INSIDE dest_root."""
+    p = Path(dest_rel)
+    if p.is_absolute() or ".." in p.parts or not str(p).strip():
+        raise ValueError(f"Destination de plan invalide (hors de l'arbre): {dest_rel!r}")
+    return str(p)
+
+
 def reorganize(source_dir: Path, dest_root: Path, manifest: Manifest,
                dedup: DedupReport | None = None, junk: dict[str, str] | None = None,
-               by_year: bool = True, dry_run: bool = False) -> ReorgReport:
+               by_year: bool = True, dry_run: bool = False,
+               plan: list[dict] | None = None) -> ReorgReport:
     """Copy every manifest file into a clean categorized tree under dest_root.
 
-    Duplicates -> _quarantine/duplicates, junk -> _quarantine/junk, everything
-    else -> Category[/Year]. dest_root MUST differ from source_dir (enforced) so
-    the source mirror is never mutated.
+    Default routing: duplicates -> _quarantine/duplicates, junk ->
+    _quarantine/junk, everything else -> Category[/Year]. When a user-edited
+    `plan` is given (rows action/src_rel/dest_rel), it fully drives the routing:
+    action=keep copies to dest_rel, quarantine copies under _quarantine/,
+    skip leaves the file out of the clean tree. Always copy-only: dest_root MUST
+    differ from source_dir (enforced) so the source mirror is never mutated.
     """
     source_dir = Path(source_dir).resolve()
     dest_root = Path(dest_root).resolve()
     if dest_root == source_dir or source_dir in dest_root.parents:
         raise ValueError("La destination de réorg doit être HORS du miroir source (sécurité).")
+
+    plan_by_src: dict[str, dict] | None = None
+    if plan is not None:
+        plan_by_src = {}
+        for row in plan:
+            action = (row.get("action") or "keep").strip().lower()
+            if action not in ("keep", "quarantine", "skip"):
+                raise ValueError(f"Action de plan inconnue: {action!r} "
+                                 "(attendu: keep | quarantine | skip)")
+            plan_by_src[row.get("src_rel", "")] = row
 
     dup_rel = {p for g in (dedup.groups if dedup else []) for p in g.duplicates}
     junk = junk or {}
@@ -104,7 +126,22 @@ def reorganize(source_dir: Path, dest_root: Path, manifest: Manifest,
         if not src.is_file():
             continue
         name = Path(e.rel_path).name
-        if e.rel_path in junk:
+        if plan_by_src is not None:
+            row = plan_by_src.get(e.rel_path)
+            if row is None or row["action"] == "skip":
+                continue  # user chose to leave this file out of the clean tree
+            wanted = _safe_plan_dest(row.get("dest_rel") or _dest_rel(e, by_year))
+            if row["action"] == "quarantine":
+                if not wanted.startswith("_quarantine/"):
+                    wanted = f"_quarantine/{wanted}"
+                rel = _unique(dest_root, wanted, e.sha256, taken)
+                report.quarantined_dup += 1
+                report.bytes_quarantined += e.size
+            else:  # keep
+                rel = _unique(dest_root, wanted, e.sha256, taken)
+                report.copied += 1
+                report.bytes_copied += e.size
+        elif e.rel_path in junk:
             rel = _unique(dest_root, f"_quarantine/junk/{name}", e.sha256, taken)
             report.quarantined_junk += 1
             report.bytes_quarantined += e.size

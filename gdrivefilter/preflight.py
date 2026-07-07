@@ -20,6 +20,29 @@ class InsufficientSpace(Exception):
     """Raised when a destination cannot hold the backup."""
 
 
+class DriveNotMounted(Exception):
+    """Raised when a destination lives on an external volume that is not mounted."""
+
+
+def check_mounted(destinations: list[Path]) -> None:
+    """Refuse to run when a /Volumes/<X> destination is not actually mounted.
+
+    Without this, an unplugged drive would silently become a plain FOLDER on the
+    internal disk and the backup would fill the Mac instead of the hard drive.
+    """
+    for dest in destinations:
+        d = Path(dest).expanduser()
+        parts = d.parts
+        if len(parts) >= 3 and parts[0] == "/" and parts[1] == "Volumes":
+            volume = Path("/Volumes") / parts[2]
+            if not volume.exists():
+                raise DriveNotMounted(
+                    f"Le disque '{volume}' n'est pas branché/monté.\n"
+                    ">>> ACTION REQUISE: branche le disque dur externe puis relance. "
+                    "(Refus de créer un faux dossier sur le disque interne.)"
+                )
+
+
 @dataclass
 class SpaceCheck:
     destination: Path

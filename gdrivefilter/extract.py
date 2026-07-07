@@ -19,7 +19,7 @@ from .config import Config
 from .drive_client import DriveClient, RemoteFile
 from .logging_conf import get_logger
 from .manifest import Entry, Manifest
-from .preflight import check_destinations
+from .preflight import check_destinations, check_mounted
 from .progress import write_progress
 
 log = get_logger("extract")
@@ -35,6 +35,7 @@ class BackupResult:
     skipped: int = 0
     errors: int = 0
     repaired: int = 0        # done files re-mirrored to a destination missing them
+    imported: int = 0        # unchanged files copied locally from a previous backup
     bytes_written: int = 0
     error_samples: list[str] = field(default_factory=list)
 
@@ -216,11 +217,14 @@ def _acquire_lock(primary: Path) -> Path:
 
 def run_backup(cfg: Config, client: DriveClient, account: str = "default",
                timestamp: str = "manual", dry_run: bool = False,
-               save_every: int = 100, workers: int | None = None) -> BackupResult:
+               save_every: int = 100, workers: int | None = None,
+               prev_dir: Path | None = None) -> BackupResult:
     """Mirror the account's drives into timestamped backup dirs under each destination.
 
     Downloads run concurrently (thread pool) so wall-clock is bound by bandwidth,
     not by per-file round-trip latency. Manifest updates stay on the main thread.
+    `prev_dir` (a previous COMPLETE backup) enables incremental mode: unchanged
+    files are hash-verified local copies instead of re-downloads.
     """
     subdir = f"{timestamp}/{account}"
     primary = cfg.backup_root / subdir
@@ -228,10 +232,11 @@ def run_backup(cfg: Config, client: DriveClient, account: str = "default",
 
     lock = None
     if not dry_run:
+        check_mounted(cfg.destinations)  # unplugged drive must never become a folder
         lock = _acquire_lock(primary)
     try:
         return _run_backup_locked(cfg, client, account, primary, dests,
-                                  dry_run, save_every, workers)
+                                  dry_run, save_every, workers, prev_dir)
     finally:
         if lock is not None:
             try:
@@ -240,9 +245,43 @@ def run_backup(cfg: Config, client: DriveClient, account: str = "default",
                 pass
 
 
+def _import_from_previous(prev_dir: Path, prev_entry, dests: list[Path],
+                          rel_path: str) -> tuple[int, str] | None:
+    """Incremental import: copy an unchanged file from a previous local backup
+    into this one (disk-to-disk, hash-verified during the copy) instead of
+    re-downloading it. Returns (size, sha256) or None to fall back to download."""
+    src = prev_dir / prev_entry.rel_path
+    try:
+        if not src.is_file() or src.stat().st_size != prev_entry.size:
+            return None
+        h = hashlib.sha256()
+        target = dests[0] / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.parent / f".part-imp-{target.name}"
+        with open(src, "rb") as fin, open(tmp, "wb") as fout:
+            for chunk in iter(lambda: fin.read(4 * 1024 * 1024), b""):
+                h.update(chunk)
+                fout.write(chunk)
+        if prev_entry.sha256 and h.hexdigest() != prev_entry.sha256:
+            tmp.unlink()   # silent corruption on the drive -> re-download instead
+            return None
+        size = tmp.stat().st_size
+        tmp.replace(target)
+        for d in dests[1:]:
+            t2 = d / rel_path
+            t2.parent.mkdir(parents=True, exist_ok=True)
+            t2_tmp = t2.parent / f".part-imp-{t2.name}"
+            shutil.copy2(target, t2_tmp)
+            t2_tmp.replace(t2)
+        return size, h.hexdigest()
+    except OSError:
+        return None
+
+
 def _run_backup_locked(cfg: Config, client: DriveClient, account: str,
                        primary: Path, dests: list[Path], dry_run: bool,
-                       save_every: int, workers: int | None) -> BackupResult:
+                       save_every: int, workers: int | None,
+                       prev_dir: Path | None = None) -> BackupResult:
     manifest_path = primary / "manifest.json"
     manifest = Manifest.load(manifest_path)
     manifest.account = account
@@ -340,10 +379,17 @@ def _run_backup_locked(cfg: Config, client: DriveClient, account: str,
     if stale:
         log.info("%d entrées en erreur purgées (fichiers disparus de Drive).", len(stale))
 
-    # Phase 1 (single-thread, fast): partition into already-done (reconcile mirrors)
-    # and pending (assign a unique local path now, before any parallel dispatch).
+    # Incremental source: the manifest of a previous COMPLETE backup, if any.
+    prev_manifest = None
+    if prev_dir is not None and (prev_dir / "manifest.json").is_file():
+        prev_manifest = Manifest.load(prev_dir / "manifest.json")
+        log.info("Mode incrémental: réutilisation locale depuis %s (%d fichiers).",
+                 prev_dir, prev_manifest.count_done())
+
+    # Phase 1 (single-thread): already-done -> reconcile mirrors; unchanged vs the
+    # previous backup -> LOCAL hash-verified copy (no download); else -> pending.
     pending: list[tuple[RemoteFile, str]] = []
-    for rf in files:
+    for i, rf in enumerate(files, 1):
         if manifest.is_done(rf.file_id):
             entry = manifest.entries[rf.file_id]
             try:
@@ -354,7 +400,35 @@ def _run_backup_locked(cfg: Config, client: DriveClient, account: str,
                 log.warning("Réparation miroir échouée pour %s: %s", entry.rel_path, e)
             result.skipped += 1
             continue
-        pending.append((rf, _unique_rel_path(rf.rel_path, rf.file_id, used_paths)))
+        rel_path = _unique_rel_path(rf.rel_path, rf.file_id, used_paths)
+        if prev_manifest is not None:
+            pe = prev_manifest.entries.get(rf.file_id)
+            unchanged = (pe is not None and pe.status == "done"
+                         and pe.modified_time == rf.modified_time
+                         and (rf.is_native or pe.size == rf.size))
+            if unchanged:
+                imported = _import_from_previous(prev_dir, pe, dests, rel_path)
+                if imported is not None:
+                    size, sha = imported
+                    manifest.upsert(Entry(
+                        file_id=rf.file_id, name=rf.name, rel_path=rel_path,
+                        mime_type=rf.mime_type, size=size, drive_id=rf.drive_id,
+                        drive_name=rf.drive_name, owner=rf.owner,
+                        modified_time=rf.modified_time, sha256=sha,
+                        exported_as=rf.export_mime, status="done",
+                    ))
+                    result.imported += 1
+                    result.bytes_written += size
+                    if result.imported % 200 == 0:
+                        manifest.save()
+                        log.info("Import local: %d fichiers réutilisés (%.1f Go)...",
+                                 result.imported, result.bytes_written / (1024**3))
+                    continue
+        pending.append((rf, rel_path))
+    if result.imported:
+        manifest.save()
+        log.info("Import local terminé: %d fichiers réutilisés sans re-téléchargement.",
+                 result.imported)
 
     n_workers = workers or cfg.download_workers
     total = len(files)

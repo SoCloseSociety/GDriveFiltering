@@ -115,11 +115,13 @@ def cmd_auth(cfg, args) -> int:
     return 0
 
 
-def _resolve_timestamp(cfg, account: str, force_new: bool) -> str:
-    """Resume the latest INCOMPLETE backup for this account, else start a new one.
+def _resolve_timestamp(cfg, account: str, force_new: bool):
+    """Pick the backup dir to (re)use and the incremental-import source.
 
-    Backups live at <backup_root>/<timestamp>/<account>/. This makes a plain
-    `backup` re-run continue where it stopped instead of starting from scratch.
+    Returns (timestamp, prev_complete_dir):
+      - resume the latest INCOMPLETE backup, else start a new timestamp;
+      - prev_complete_dir is the newest COMPLETE backup (excluding the target),
+        used to LOCALLY reuse unchanged files instead of re-downloading them.
     """
     base = cfg.backup_root
     candidates = []
@@ -132,26 +134,44 @@ def _resolve_timestamp(cfg, account: str, force_new: bool) -> str:
             if (d / account / "manifest.json").is_file():
                 candidates.append(d.name)
     candidates.sort()
-    if candidates and not force_new:
-        latest = candidates[-1]
-        m = Manifest.load(base / latest / account / "manifest.json")
-        complete, reason = m.is_complete()
-        if not complete:
-            log.info("Reprise du backup existant %s (%s -- %d/%d déjà faits).",
-                     latest, reason, m.count_done(), m.expected_total or m.count_done())
-            return latest
-        log.info("Dernier backup %s déjà complet -> création d'un nouveau backup.", latest)
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    completeness: dict[str, bool] = {}
+    for name in candidates:
+        m = Manifest.load(base / name / account / "manifest.json")
+        completeness[name] = m.is_complete()[0]
+
+    target = None
+    if candidates and not force_new and not completeness[candidates[-1]]:
+        target = candidates[-1]
+        m = Manifest.load(base / target / account / "manifest.json")
+        log.info("Reprise du backup existant %s (%d/%d déjà faits).",
+                 target, m.count_done(), m.expected_total or m.count_done())
+    else:
+        if candidates and not force_new:
+            log.info("Dernier backup %s déjà complet -> nouveau backup incrémental.",
+                     candidates[-1])
+        target = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    prev_complete = None
+    for name in reversed(candidates):
+        if name != target and completeness.get(name):
+            prev_complete = base / name / account
+            break
+    return target, prev_complete
 
 
 def cmd_backup(cfg, args) -> int:
     from .extract import run_backup
     client = _make_client(cfg, args.account)
-    ts = (datetime.now().strftime("%Y%m%d_%H%M%S") if args.dry_run
-          else _resolve_timestamp(cfg, args.account, args.new))
-    res = run_backup(cfg, client, account=args.account, timestamp=ts, dry_run=args.dry_run)
-    print(f"\nBackup: dl={res.downloaded} skip={res.skipped} err={res.errors} "
-          f"repair={res.repaired} ({res.bytes_written/GB:.2f} Go) -> {res.backup_dir}")
+    if args.dry_run:
+        ts, prev = datetime.now().strftime("%Y%m%d_%H%M%S"), None
+    else:
+        ts, prev = _resolve_timestamp(cfg, args.account, args.new)
+    res = run_backup(cfg, client, account=args.account, timestamp=ts,
+                     dry_run=args.dry_run, prev_dir=prev)
+    print(f"\nBackup: dl={res.downloaded} import={res.imported} skip={res.skipped} "
+          f"err={res.errors} repair={res.repaired} ({res.bytes_written/GB:.2f} Go) "
+          f"-> {res.backup_dir}")
     if res.error_samples:
         print("Erreurs (échantillon):")
         for s in res.error_samples:
@@ -205,13 +225,17 @@ def cmd_dedup(cfg, args) -> int:
 def cmd_reorganize(cfg, args) -> int:
     from .dedup import find_exact_duplicates
     from .filters import junk_paths
+    from .propose import read_plan_csv
     from .reorganize import reorganize
     d = Path(args.dir)
     manifest = Manifest.load(d / "manifest.json")
     dedup = find_exact_duplicates(manifest)
     junk = junk_paths(manifest.done_entries())
+    plan = read_plan_csv(Path(args.plan)) if args.plan else None
+    if plan is not None:
+        print(f"Plan utilisateur chargé: {len(plan)} lignes ({args.plan})")
     rep = reorganize(d, Path(args.dest), manifest, dedup=dedup, junk=junk,
-                     by_year=not args.no_year, dry_run=args.dry_run)
+                     by_year=not args.no_year, dry_run=args.dry_run, plan=plan)
     _write_report(Path(args.dest) / "reports" / "reorganize.json", {
         "copied": rep.copied, "quarantined_dup": rep.quarantined_dup,
         "quarantined_junk": rep.quarantined_junk,
@@ -228,7 +252,7 @@ def cmd_propose(cfg, args) -> int:
     import json as _json
 
     from .progress import read_snapshot
-    from .propose import build_proposal, render_html, render_text
+    from .propose import build_plan, build_proposal, render_html, render_text, write_plan_csv
     d = Path(args.dir) if args.dir else _latest_backup_dir(cfg, args.account)
     if d is None:
         print(f"Aucun backup trouvé pour le compte '{args.account}'.")
@@ -239,6 +263,9 @@ def cmd_propose(cfg, args) -> int:
 
     reports = d / "reports"
     reports.mkdir(parents=True, exist_ok=True)
+    # Editable plan: change dest_rel / set action to keep|quarantine|skip, then
+    # apply with: reorganize --dir <backup> --dest <clean> --plan <plan.csv>
+    write_plan_csv(build_plan(manifest), reports / "plan.csv")
     (reports / "proposal.txt").write_text(render_text(prop), encoding="utf-8")
     (reports / "proposal.json").write_text(
         _json.dumps(dataclasses.asdict(prop), default=str, indent=2, ensure_ascii=False),
@@ -249,6 +276,7 @@ def cmd_propose(cfg, args) -> int:
     html_path = Path(args.html) if args.html else reports / "proposal.html"
     html_path.write_text(render_html(prop, prog), encoding="utf-8")
     print(f"\nRapports écrits: {reports}/proposal.(txt|json|html)")
+    print(f"Plan éditable  : {reports}/plan.csv  (actions: keep|quarantine|skip)")
     print(f"Dashboard HTML : {html_path}")
     return 0
 
@@ -319,6 +347,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--dest", required=True)
     r.add_argument("--no-year", action="store_true")
     r.add_argument("--dry-run", action="store_true")
+    r.add_argument("--plan", help="Plan CSV édité (généré par `propose` dans reports/plan.csv)")
 
     pg = sub.add_parser("purge", help="Supprime les doublons (COPIE uniquement, ultra-gardé)")
     pg.add_argument("--primary", required=True, help="Dossier de backup principal vérifié")
