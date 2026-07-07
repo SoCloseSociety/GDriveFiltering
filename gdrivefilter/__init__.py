@@ -6,4 +6,4 @@ Safety contract (see CLAUDE.md):
   - Cleaning/dedup only detect, report and quarantine (into a COPY).
 """
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
