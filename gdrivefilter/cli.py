@@ -41,6 +41,8 @@ def _latest_backup_dir(cfg, account: str):
     cands = []
     if base.exists():
         for dd in base.iterdir():
+            if dd.name.startswith("_"):  # _clean/ etc. are not backups
+                continue
             if (dd / account / "manifest.json").is_file():
                 cands.append(dd.name)
     if not cands:
@@ -114,6 +116,10 @@ def _resolve_timestamp(cfg, account: str, force_new: bool) -> str:
     candidates = []
     if base.exists():
         for d in base.iterdir():
+            # "_"-prefixed dirs (e.g. _clean/) are not backups and sort after
+            # digits in ASCII -- they must never be picked as "latest".
+            if d.name.startswith("_"):
+                continue
             if (d / account / "manifest.json").is_file():
                 candidates.append(d.name)
     candidates.sort()
@@ -153,8 +159,16 @@ def cmd_backup(cfg, args) -> int:
 
 def cmd_verify(cfg, args) -> int:
     from .verify import verify_backup
-    rep = verify_backup(Path(args.dir), check_hash=not args.no_hash)
+    d = Path(args.dir)
+    rep = verify_backup(d, check_hash=not args.no_hash)
     print(rep.summary())
+    _write_report(d / "reports" / "verify.json", {
+        "clean": rep.clean, "complete": rep.complete, "complete_reason": rep.complete_reason,
+        "total": rep.total, "ok": rep.ok,
+        "missing": len(rep.missing), "size_mismatch": len(rep.size_mismatch),
+        "hash_mismatch": len(rep.hash_mismatch),
+        "checked_at": datetime.now().isoformat(timespec="seconds"),
+    })
     return 0 if rep.clean else 2
 
 

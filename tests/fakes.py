@@ -45,6 +45,9 @@ class FakeBackend:
         self.export_calls.append(file_id)
         return self.exports[file_id]
 
+    def reset(self) -> None:
+        pass
+
     def download_to(self, file_id: str, fileobj) -> None:
         self.download_calls.append(file_id)
         fileobj.write(self.content[file_id])

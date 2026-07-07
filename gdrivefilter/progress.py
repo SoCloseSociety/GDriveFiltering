@@ -18,15 +18,21 @@ GB = 1024 ** 3
 
 
 def write_progress(backup_dir: Path, done: int, expected: int, errors: int,
-                   bytes_written: int, elapsed_s: float) -> None:
-    """Atomically write the heartbeat. Never raises (progress is best-effort)."""
+                   bytes_written: int, elapsed_s: float, expected_bytes: int = 0,
+                   rate_bps: float | None = None) -> None:
+    """Atomically write the heartbeat. Never raises (progress is best-effort).
+
+    `bytes_written` is cumulative (incl. resumed bytes); pass `rate_bps` as the
+    delta rate since this run started, and `expected_bytes` for a real ETA."""
     try:
         p = Path(backup_dir)
         p.mkdir(parents=True, exist_ok=True)
         payload = {
             "done": done, "expected": expected, "errors": errors,
-            "bytes_written": bytes_written, "elapsed_s": round(elapsed_s, 1),
-            "rate_bps": (bytes_written / elapsed_s) if elapsed_s > 0 else 0,
+            "bytes_written": bytes_written, "expected_bytes": expected_bytes,
+            "elapsed_s": round(elapsed_s, 1),
+            "rate_bps": rate_bps if rate_bps is not None else (
+                (bytes_written / elapsed_s) if elapsed_s > 0 else 0),
         }
         # Per-thread tmp name: the heartbeat thread and the main loop both write
         # this file; a shared tmp could interleave/race. Distinct tmp -> safe.
@@ -53,7 +59,8 @@ def _manifest_head(backup_dir: Path) -> dict | None:
         return int(mt.group(1)) if mt else 0
 
     return {"done": num("done"), "expected": num("expected_total"),
-            "count": num("count"), "bytes_written": num("total_bytes")}
+            "count": num("count"), "bytes_written": num("total_bytes"),
+            "expected_bytes": num("expected_bytes")}
 
 
 @dataclass
@@ -63,12 +70,17 @@ class Snapshot:
     expected: int = 0
     errors: int = 0
     bytes_written: int = 0
+    expected_bytes: int = 0
     rate_bps: float = 0.0
     source: str = "none"
 
     @property
     def pct(self) -> float:
         return (100.0 * self.done / self.expected) if self.expected else 0.0
+
+    @property
+    def pct_bytes(self) -> float:
+        return (100.0 * self.bytes_written / self.expected_bytes) if self.expected_bytes else self.pct
 
 
 def read_snapshot(backup_dir: Path) -> Snapshot | None:
@@ -80,15 +92,16 @@ def read_snapshot(backup_dir: Path) -> Snapshot | None:
             d = json.loads(hb.read_text(encoding="utf-8"))
             return Snapshot(p, d.get("done", 0), d.get("expected", 0),
                             d.get("errors", 0), d.get("bytes_written", 0),
-                            d.get("rate_bps", 0.0), source="heartbeat")
+                            d.get("expected_bytes", 0), d.get("rate_bps", 0.0),
+                            source="heartbeat")
         except (OSError, ValueError):
             pass
     head = _manifest_head(p)
     if head is None:
         return None
     errs = max(0, head["count"] - head["done"])
-    return Snapshot(p, head["done"], head["expected"], errs,
-                    head["bytes_written"], 0.0, source="manifest")
+    return Snapshot(p, head["done"], head["expected"], errs, head["bytes_written"],
+                    head["expected_bytes"], 0.0, source="manifest")
 
 
 def render_bar(pct: float, width: int = 32) -> str:
@@ -109,12 +122,20 @@ def human_eta(remaining_bytes: float, rate_bps: float) -> str:
     return f"{s}s"
 
 
+def remaining_bytes(snap: Snapshot) -> float:
+    """Bytes left to download. Uses the known expected total when available,
+    else estimates from average file size (avoids the resumed-files skew)."""
+    if snap.expected_bytes:
+        return max(0, snap.expected_bytes - snap.bytes_written)
+    avg = (snap.bytes_written / snap.done) if snap.done else 0
+    return max(0, snap.expected - snap.done) * avg
+
+
 def format_line(snap: Snapshot, rate_bps: float | None = None) -> str:
     rate = rate_bps if rate_bps is not None else snap.rate_bps
-    avg_size = (snap.bytes_written / snap.done) if snap.done else 0
-    remaining = max(0, snap.expected - snap.done) * avg_size
+    gb_total = f"/{snap.expected_bytes/GB:.0f}" if snap.expected_bytes else ""
     return (f"{render_bar(snap.pct)} {snap.pct:5.1f}%  "
             f"{snap.done}/{snap.expected} fichiers  "
-            f"{snap.bytes_written/GB:6.2f} Go  "
+            f"{snap.bytes_written/GB:6.2f}{gb_total} Go  "
             f"err={snap.errors}  "
-            f"{rate/1e6:5.2f} Mo/s  ETA {human_eta(remaining, rate)}")
+            f"{rate/1e6:5.2f} Mo/s  ETA {human_eta(remaining_bytes(snap), rate)}")

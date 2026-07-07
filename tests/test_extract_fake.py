@@ -38,6 +38,9 @@ def test_backup_writes_both_destinations_and_manifest(cfg):
 
     m = Manifest.load(primary / "manifest.json")
     assert m.count_done() == 7
+    # Expected/actual byte tracking is persisted for accurate %/ETA.
+    assert m.expected_bytes == 27          # listing sizes: 5+5+3+4+4+6 (native doc = 0)
+    assert m.total_bytes() == 37           # actual bytes incl. the 10-byte .docx export
 
 
 def test_same_name_files_do_not_overwrite(cfg):

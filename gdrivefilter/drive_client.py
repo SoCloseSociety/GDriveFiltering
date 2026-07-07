@@ -96,6 +96,11 @@ class GoogleDriveBackend:
             self._local.svc = s
         return s
 
+    def reset(self) -> None:
+        """Drop this thread's service so the next call builds a fresh connection.
+        Used to recover from a dead/half-closed HTTP connection."""
+        self._local.svc = None
+
     def files_list(self, **params) -> dict:
         return _retry(lambda: self.service.files().list(**params).execute())
 
@@ -301,6 +306,12 @@ class DriveClient:
             self.backend.export_to(rf.file_id, rf.export_mime, fileobj)
         else:
             self.backend.download_to(rf.file_id, fileobj)
+
+    def reset_connection(self) -> None:
+        """Force a fresh HTTP connection on the current thread (if supported)."""
+        reset = getattr(self.backend, "reset", None)
+        if callable(reset):
+            reset()
 
 
 # Cap a path component well under the exFAT/NTFS 255-unit limit, leaving room for

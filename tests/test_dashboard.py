@@ -4,7 +4,7 @@ import threading
 import urllib.request
 from http.server import ThreadingHTTPServer
 
-from gdrivefilter.dashboard import _discover_accounts, _launch, make_handler
+from gdrivefilter.dashboard import _discover_accounts, _launch, _pipeline, make_handler
 from gdrivefilter.drive_client import DriveClient
 from gdrivefilter.extract import run_backup
 from tests.fakes import sample_tree
@@ -73,6 +73,22 @@ def test_backup_action_refused_while_running(cfg):
     run_backup(cfg, DriveClient(sample_tree()), account="default", timestamp="D3")
     r = _launch(cfg, "backup", "default")
     assert r["ok"] is False and "cours" in r["message"].lower()
+
+
+def test_pipeline_stages_and_gating(cfg):
+    run_backup(cfg, DriveClient(sample_tree()), account="default", timestamp="PL")
+    d = _discover_accounts(cfg)["default"]
+    stages = {s["key"]: s for s in _pipeline(cfg, "default", d)["stages"]}
+    assert stages["backup"]["status"] == "done"        # complete backup
+    assert stages["verify"]["status"] == "todo"        # not verified yet
+    assert stages["propose"]["status"] == "todo"
+    assert stages["reorganize"]["status"] == "blocked"  # gated on a clean verify
+
+    (d / "reports").mkdir(parents=True, exist_ok=True)
+    (d / "reports" / "verify.json").write_text(json.dumps({"clean": True}), encoding="utf-8")
+    stages = {s["key"]: s for s in _pipeline(cfg, "default", d)["stages"]}
+    assert stages["verify"]["status"] == "done"
+    assert stages["reorganize"]["status"] == "todo"     # unblocked once verified
 
 
 def test_invalid_json_post_is_400(cfg):

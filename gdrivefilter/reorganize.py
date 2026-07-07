@@ -63,17 +63,20 @@ def _dest_rel(entry: Entry, by_year: bool) -> str:
 
 
 def _unique(dest_root: Path, rel: str, sha: str, taken: set[str]) -> str:
-    if rel not in taken and not (dest_root / rel).exists():
-        taken.add(rel)
+    """Unique destination path. `taken` holds CASEFOLDED paths: many targets
+    (exFAT/APFS/NTFS) are case-insensitive, so 'Report.pdf' and 'report.pdf'
+    must not map to the same physical file (also keeps dry-run mappings exact)."""
+    if rel.casefold() not in taken and not (dest_root / rel).exists():
+        taken.add(rel.casefold())
         return rel
     p = Path(rel)
     suffix = (sha or "dup")[:8]
     candidate = str(p.with_name(f"{p.stem}__{suffix}{p.suffix}"))
     n = 1
-    while candidate in taken or (dest_root / candidate).exists():
+    while candidate.casefold() in taken or (dest_root / candidate).exists():
         candidate = str(p.with_name(f"{p.stem}__{suffix}_{n}{p.suffix}"))
         n += 1
-    taken.add(candidate)
+    taken.add(candidate.casefold())
     return candidate
 
 

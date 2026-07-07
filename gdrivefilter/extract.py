@@ -98,38 +98,49 @@ class _HashingWriter:
         return self._fh.write(b)
 
 
+# Transient network drops that warrant a full-file retry with a fresh connection.
+_NET_ERRORS = (ConnectionError, TimeoutError, OSError)
+_FILE_ATTEMPTS = 4
+
+
 def _download_one(client: DriveClient, dests: list[Path], rf: RemoteFile, rel_path: str):
     """Worker: STREAM one file to disk (memory-bounded), hashing as it goes.
 
-    Writes to a per-file unique temp (no shared .part -> no cross-thread race,
-    even on case-insensitive filesystems), fsync-free atomic rename, then copies
-    to any extra destinations. Returns a plain tuple; the main thread owns the
-    manifest (lock-free)."""
+    Retries the whole file on a dropped connection (rebuilding the HTTP
+    connection and truncating the temp), so large files survive Google closing
+    a long-lived socket. Writes to a per-file unique temp (no shared .part ->
+    no cross-thread race), atomic rename, then copies to extra destinations.
+    Returns a plain tuple; the main thread owns the manifest (lock-free)."""
     primary = dests[0]
     target = primary / rel_path
-    tmp = None
+    token = (rf.file_id or "x").replace("/", "_")[:16]
+    tmp = target.parent / f".part-{token}-{target.name}"
+    last = ""
+    for attempt in range(_FILE_ATTEMPTS):
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            h = hashlib.sha256()
+            with open(tmp, "wb") as fh:  # 'wb' truncates -> clean restart each attempt
+                client.download_to_file(rf, _HashingWriter(fh, h))
+            size = tmp.stat().st_size
+            tmp.replace(target)
+            for d in dests[1:]:
+                t2 = d / rel_path
+                t2.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target, t2)
+            return rf, rel_path, size, h.hexdigest(), None
+        except _NET_ERRORS as e:  # transient: rebuild connection and retry the file
+            last = str(e)
+            client.reset_connection()
+            time.sleep(1.5 * (attempt + 1))
+        except Exception as e:  # noqa: BLE001 - non-network: don't retry, report
+            last = str(e)
+            break
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        token = (rf.file_id or "x").replace("/", "_")[:16]
-        tmp = target.parent / f".part-{token}-{target.name}"
-        h = hashlib.sha256()
-        with open(tmp, "wb") as fh:
-            client.download_to_file(rf, _HashingWriter(fh, h))
-        size = tmp.stat().st_size
-        tmp.replace(target)
-        tmp = None
-        for d in dests[1:]:
-            t2 = d / rel_path
-            t2.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(target, t2)
-        return rf, rel_path, size, h.hexdigest(), None
-    except Exception as e:  # noqa: BLE001 - reported to main thread, never aborts the pool
-        if tmp is not None:
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-        return rf, rel_path, rf.size, "", str(e)
+        tmp.unlink()
+    except OSError:
+        pass
+    return rf, rel_path, rf.size, "", last
 
 
 def run_backup(cfg: Config, client: DriveClient, account: str = "default",
@@ -169,6 +180,7 @@ def run_backup(cfg: Config, client: DriveClient, account: str = "default",
     manifest = Manifest.load(manifest_path)
     manifest.account = account
     manifest.expected_total = len(files)
+    manifest.expected_bytes = known_bytes
     result = BackupResult(account, primary, manifest_path, total_files=len(files))
 
     if dry_run:
@@ -178,6 +190,8 @@ def run_backup(cfg: Config, client: DriveClient, account: str = "default",
 
     # Seed used paths (casefolded) from completed entries so a resume never reassigns.
     used_paths: set[str] = {e.rel_path.casefold() for e in manifest.done_entries()}
+    # Cumulative bytes already backed up (so %/ETA count resumed data too).
+    result.bytes_written = sum(e.size for e in manifest.done_entries())
 
     # Phase 1 (single-thread, fast): partition into already-done (reconcile mirrors)
     # and pending (assign a unique local path now, before any parallel dispatch).
@@ -213,6 +227,7 @@ def run_backup(cfg: Config, client: DriveClient, account: str = "default",
     # Phase 2 (parallel): download concurrently; the main thread updates the manifest.
     processed = 0
     start = time.monotonic()
+    start_bytes = result.bytes_written  # cumulative bytes at run start (for delta rate)
 
     # Time-based heartbeat so `status`/dashboard stay fresh even during long
     # large-file downloads (when no file completes for minutes). Reads only ints.
@@ -221,10 +236,15 @@ def run_backup(cfg: Config, client: DriveClient, account: str = "default",
     def _heartbeat():
         while not stop_hb.wait(15):
             try:
-                write_progress(primary, result.skipped + result.downloaded, total,
-                               result.errors, result.bytes_written, time.monotonic() - start)
+                el = time.monotonic() - start
+                rate = (result.bytes_written - start_bytes) / el if el > 0 else 0
+                write_progress(primary, manifest_done_estimate(), total, result.errors,
+                               result.bytes_written, el, manifest.expected_bytes, rate)
             except Exception:  # noqa: BLE001 - heartbeat must never die
                 pass
+
+    def manifest_done_estimate() -> int:
+        return result.skipped + result.downloaded
 
     hb = threading.Thread(target=_heartbeat, daemon=True)
     hb.start()
@@ -259,9 +279,9 @@ def run_backup(cfg: Config, client: DriveClient, account: str = "default",
             if processed % save_every == 0:
                 manifest.save()
                 elapsed = time.monotonic() - start
-                rate = result.bytes_written / elapsed if elapsed > 0 else 0
+                rate = (result.bytes_written - start_bytes) / elapsed if elapsed > 0 else 0
                 write_progress(primary, manifest.count_done(), total, result.errors,
-                               result.bytes_written, elapsed)
+                               result.bytes_written, elapsed, manifest.expected_bytes, rate)
                 log.info("Progression: %d/%d (dl=%d skip=%d err=%d, %.2f Go, %.2f Mo/s)",
                          result.skipped + processed, total, result.downloaded,
                          result.skipped, result.errors, result.bytes_written / (1024**3),
@@ -270,8 +290,10 @@ def run_backup(cfg: Config, client: DriveClient, account: str = "default",
         stop_hb.set()
 
     manifest.save()
+    _elapsed = time.monotonic() - start
     write_progress(primary, manifest.count_done(), total, result.errors,
-                   result.bytes_written, time.monotonic() - start)
+                   result.bytes_written, _elapsed, manifest.expected_bytes,
+                   (result.bytes_written - start_bytes) / _elapsed if _elapsed > 0 else 0)
     # Copy the manifest into every destination so each mirror is self-describing.
     for dest in dests:
         if dest != primary:

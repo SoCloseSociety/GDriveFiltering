@@ -46,6 +46,7 @@ class Manifest:
         self.account = account
         self.entries: dict[str, Entry] = {}  # keyed by file_id
         self.expected_total = 0  # files the walk said should be backed up this run
+        self.expected_bytes = 0  # total known bytes to back up (from the listing)
 
     # ---- persistence -------------------------------------------------
     @staticmethod
@@ -72,6 +73,7 @@ class Manifest:
             data = json.loads(p.read_text(encoding="utf-8"))
             m.account = data.get("account", "")
             m.expected_total = int(data.get("expected_total", 0) or 0)
+            m.expected_bytes = int(data.get("expected_bytes", 0) or 0)
             for row in data.get("entries", []):
                 e = cls._entry_from_row(row)
                 m.entries[e.file_id] = e
@@ -82,6 +84,7 @@ class Manifest:
         payload = {
             "account": self.account,
             "expected_total": self.expected_total,
+            "expected_bytes": self.expected_bytes,
             "count": len(self.entries),
             "done": self.count_done(),
             "total_bytes": self.total_bytes(),

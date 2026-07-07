@@ -44,8 +44,11 @@ def _bump(d: dict, key: str, size: int) -> None:
 def build_proposal(backup_dir: Path, manifest: Manifest) -> Proposal:
     entries = manifest.done_entries()
     dedup = find_exact_duplicates(manifest)
-    dup_rel = {p for g in dedup.groups for p in g.duplicates}
     junk = junk_paths(entries)
+    # Junk wins over duplicate (same routing as reorganize): a file that is both
+    # is counted once, as junk -- never double-counted in the reclaim numbers.
+    by_path = {e.rel_path: e for e in entries}
+    dup_rel = {p for g in dedup.groups for p in g.duplicates if p not in junk}
 
     p = Proposal(Path(backup_dir))
     for e in entries:
@@ -64,8 +67,8 @@ def build_proposal(backup_dir: Path, manifest: Manifest) -> Proposal:
         _bump(p.by_source, e.drive_name or "?", e.size)
         _bump(p.by_year, (e.modified_time or "????")[:4] or "????", e.size)
 
-    p.dupe_files = dedup.duplicate_count
-    p.dupe_reclaim = dedup.reclaimable_bytes
+    p.dupe_files = len(dup_rel)
+    p.dupe_reclaim = sum(by_path[r].size for r in dup_rel if r in by_path)
     return p
 
 
