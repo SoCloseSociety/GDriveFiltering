@@ -82,7 +82,9 @@ def _account_state(cfg: Config, account: str, backup_dir: Path) -> dict:
         "done": snap.done if snap else 0,
         "expected": snap.expected if snap else 0,
         "errors": snap.errors if snap else 0,
-        "bytes": snap.bytes_written if snap else 0,
+        "bytes": snap.effective_bytes if snap else 0,          # completed + in-flight
+        "bytes_done": snap.bytes_written if snap else 0,
+        "bytes_inflight": snap.bytes_inflight if snap else 0,
         "expected_bytes": snap.expected_bytes if snap else 0,
         "rate_bps": snap.rate_bps if snap else 0,
         "pct": round(snap.pct, 2) if snap else 0,

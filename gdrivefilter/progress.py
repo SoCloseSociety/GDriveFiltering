@@ -19,17 +19,20 @@ GB = 1024 ** 3
 
 def write_progress(backup_dir: Path, done: int, expected: int, errors: int,
                    bytes_written: int, elapsed_s: float, expected_bytes: int = 0,
-                   rate_bps: float | None = None) -> None:
+                   rate_bps: float | None = None, bytes_inflight: int = 0) -> None:
     """Atomically write the heartbeat. Never raises (progress is best-effort).
 
-    `bytes_written` is cumulative (incl. resumed bytes); pass `rate_bps` as the
-    delta rate since this run started, and `expected_bytes` for a real ETA."""
+    `bytes_written` is cumulative COMPLETED bytes (incl. resumed); `bytes_inflight`
+    is bytes of files currently downloading (their .part), so %/rate/ETA stay
+    accurate during long large-file transfers. Pass `rate_bps` as the delta rate
+    since this run started."""
     try:
         p = Path(backup_dir)
         p.mkdir(parents=True, exist_ok=True)
         payload = {
             "done": done, "expected": expected, "errors": errors,
             "bytes_written": bytes_written, "expected_bytes": expected_bytes,
+            "bytes_inflight": bytes_inflight,
             "elapsed_s": round(elapsed_s, 1),
             "rate_bps": rate_bps if rate_bps is not None else (
                 (bytes_written / elapsed_s) if elapsed_s > 0 else 0),
@@ -72,7 +75,13 @@ class Snapshot:
     bytes_written: int = 0
     expected_bytes: int = 0
     rate_bps: float = 0.0
+    bytes_inflight: int = 0
     source: str = "none"
+
+    @property
+    def effective_bytes(self) -> int:
+        """Completed + currently-downloading bytes (smooth during big files)."""
+        return self.bytes_written + self.bytes_inflight
 
     @property
     def pct(self) -> float:
@@ -80,7 +89,7 @@ class Snapshot:
 
     @property
     def pct_bytes(self) -> float:
-        return (100.0 * self.bytes_written / self.expected_bytes) if self.expected_bytes else self.pct
+        return (100.0 * self.effective_bytes / self.expected_bytes) if self.expected_bytes else self.pct
 
 
 def read_snapshot(backup_dir: Path) -> Snapshot | None:
@@ -93,7 +102,7 @@ def read_snapshot(backup_dir: Path) -> Snapshot | None:
             return Snapshot(p, d.get("done", 0), d.get("expected", 0),
                             d.get("errors", 0), d.get("bytes_written", 0),
                             d.get("expected_bytes", 0), d.get("rate_bps", 0.0),
-                            source="heartbeat")
+                            d.get("bytes_inflight", 0), source="heartbeat")
         except (OSError, ValueError):
             pass
     head = _manifest_head(p)
@@ -101,7 +110,7 @@ def read_snapshot(backup_dir: Path) -> Snapshot | None:
         return None
     errs = max(0, head["count"] - head["done"])
     return Snapshot(p, head["done"], head["expected"], errs, head["bytes_written"],
-                    head["expected_bytes"], 0.0, source="manifest")
+                    head["expected_bytes"], 0.0, 0, source="manifest")
 
 
 def render_bar(pct: float, width: int = 32) -> str:
@@ -126,7 +135,7 @@ def remaining_bytes(snap: Snapshot) -> float:
     """Bytes left to download. Uses the known expected total when available,
     else estimates from average file size (avoids the resumed-files skew)."""
     if snap.expected_bytes:
-        return max(0, snap.expected_bytes - snap.bytes_written)
+        return max(0, snap.expected_bytes - snap.effective_bytes)
     avg = (snap.bytes_written / snap.done) if snap.done else 0
     return max(0, snap.expected - snap.done) * avg
 
@@ -136,6 +145,6 @@ def format_line(snap: Snapshot, rate_bps: float | None = None) -> str:
     gb_total = f"/{snap.expected_bytes/GB:.0f}" if snap.expected_bytes else ""
     return (f"{render_bar(snap.pct)} {snap.pct:5.1f}%  "
             f"{snap.done}/{snap.expected} fichiers  "
-            f"{snap.bytes_written/GB:6.2f}{gb_total} Go  "
+            f"{snap.effective_bytes/GB:6.2f}{gb_total} Go  "
             f"err={snap.errors}  "
             f"{rate/1e6:5.2f} Mo/s  ETA {human_eta(remaining_bytes(snap), rate)}")

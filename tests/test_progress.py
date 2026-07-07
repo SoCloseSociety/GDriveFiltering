@@ -30,3 +30,18 @@ def test_heartbeat_is_preferred(tmp_path):
     assert snap.source == "heartbeat"
     assert snap.done == 7 and snap.errors == 1
     assert snap.rate_bps == 70.0
+
+
+def test_inflight_bytes_count_toward_progress(tmp_path):
+    # 40 GB completed + 3 GB currently downloading, out of 100 GB expected.
+    write_progress(tmp_path, done=10, expected=100, errors=0,
+                   bytes_written=40_000_000_000, elapsed_s=100.0,
+                   expected_bytes=100_000_000_000, rate_bps=430_000_000,
+                   bytes_inflight=3_000_000_000)
+    snap = read_snapshot(tmp_path)
+    assert snap.bytes_inflight == 3_000_000_000
+    assert snap.effective_bytes == 43_000_000_000
+    # %/ETA use effective bytes so they don't stall during large downloads.
+    assert 42.9 < snap.pct_bytes < 43.1
+    from gdrivefilter.progress import remaining_bytes
+    assert remaining_bytes(snap) == 57_000_000_000

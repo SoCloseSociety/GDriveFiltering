@@ -129,48 +129,56 @@ def _is_transient(e: BaseException) -> bool:
     return False
 
 
-def _download_one(client: DriveClient, dests: list[Path], rf: RemoteFile, rel_path: str):
+def _download_one(client: DriveClient, dests: list[Path], rf: RemoteFile, rel_path: str,
+                  inflight: dict | None = None):
     """Worker: STREAM one file to disk (memory-bounded), hashing as it goes.
 
     Retries the whole file on a dropped connection (rebuilding the HTTP
     connection and truncating the temp), so large files survive Google closing
     a long-lived socket. Writes to a per-file unique temp (no shared .part ->
     no cross-thread race), atomic rename, then copies to extra destinations.
-    Returns a plain tuple; the main thread owns the manifest (lock-free)."""
+    Registers its temp in `inflight` so the heartbeat can count in-progress
+    bytes. Returns a plain tuple; the main thread owns the manifest (lock-free)."""
     primary = dests[0]
     target = primary / rel_path
     token = (rf.file_id or "x").replace("/", "_")[:16]
     tmp = target.parent / f".part-{token}-{target.name}"
+    if inflight is not None:
+        inflight[token] = tmp
     last = ""
-    for attempt in range(_FILE_ATTEMPTS):
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            h = hashlib.sha256()
-            with open(tmp, "wb") as fh:  # 'wb' truncates -> clean restart each attempt
-                client.download_to_file(rf, _HashingWriter(fh, h))
-            size = tmp.stat().st_size
-            tmp.replace(target)
-            for d in dests[1:]:
-                t2 = d / rel_path
-                t2.parent.mkdir(parents=True, exist_ok=True)
-                t2_tmp = t2.parent / f".part-{token}-{t2.name}"
-                shutil.copy2(target, t2_tmp)   # atomic on the mirror too: a crash
-                t2_tmp.replace(t2)             # mid-copy never leaves a truncated file
-            return rf, rel_path, size, h.hexdigest(), None
-        except _NET_ERRORS as e:
-            last = str(e)
-            if not _is_transient(e):  # disk full/unmounted/permissions: no retry
-                break
-            client.reset_connection()  # transient: fresh connection, retry the file
-            time.sleep(1.5 * (attempt + 1))
-        except Exception as e:  # noqa: BLE001 - non-network: don't retry, report
-            last = str(e)
-            break
     try:
-        tmp.unlink()
-    except OSError:
-        pass
-    return rf, rel_path, rf.size, "", last
+        for attempt in range(_FILE_ATTEMPTS):
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                h = hashlib.sha256()
+                with open(tmp, "wb") as fh:  # 'wb' truncates -> clean restart each attempt
+                    client.download_to_file(rf, _HashingWriter(fh, h))
+                size = tmp.stat().st_size
+                tmp.replace(target)
+                for d in dests[1:]:
+                    t2 = d / rel_path
+                    t2.parent.mkdir(parents=True, exist_ok=True)
+                    t2_tmp = t2.parent / f".part-{token}-{t2.name}"
+                    shutil.copy2(target, t2_tmp)   # atomic on the mirror too: a crash
+                    t2_tmp.replace(t2)             # mid-copy never leaves a truncated file
+                return rf, rel_path, size, h.hexdigest(), None
+            except _NET_ERRORS as e:
+                last = str(e)
+                if not _is_transient(e):  # disk full/unmounted/permissions: no retry
+                    break
+                client.reset_connection()  # transient: fresh connection, retry the file
+                time.sleep(1.5 * (attempt + 1))
+            except Exception as e:  # noqa: BLE001 - non-network: don't retry, report
+                last = str(e)
+                break
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return rf, rel_path, rf.size, "", last
+    finally:
+        if inflight is not None:
+            inflight.pop(token, None)
 
 
 class BackupLocked(Exception):
@@ -242,6 +250,16 @@ def _run_backup_locked(cfg: Config, client: DriveClient, account: str,
     total = manifest.expected_total  # refined after the listing
     start = time.monotonic()
     start_bytes = 0
+    inflight: dict[str, Path] = {}   # token -> active .part path (for live byte count)
+
+    def _inflight_bytes() -> int:
+        total_b = 0
+        for p in list(inflight.values()):
+            try:
+                total_b += p.stat().st_size
+            except OSError:
+                pass
+        return total_b
 
     # Heartbeat from the very start: the listing + mirror-reconcile phases can
     # run for minutes with no file completing, and `status`/dashboard (and its
@@ -252,10 +270,12 @@ def _run_backup_locked(cfg: Config, client: DriveClient, account: str,
         while not stop_hb.wait(15):
             try:
                 el = time.monotonic() - start
-                rate = (result.bytes_written - start_bytes) / el if el > 0 else 0
+                inflight_b = _inflight_bytes()
+                effective = result.bytes_written + inflight_b
+                rate = max(0.0, (effective - start_bytes) / el) if el > 0 else 0
                 write_progress(primary, result.skipped + result.downloaded, total,
                                result.errors, result.bytes_written, el,
-                               manifest.expected_bytes, rate)
+                               manifest.expected_bytes, rate, inflight_b)
             except Exception:  # noqa: BLE001 - heartbeat must never die
                 pass
 
@@ -356,7 +376,7 @@ def _run_backup_locked(cfg: Config, client: DriveClient, account: str,
     processed = 0
     try:
       with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        futures = [pool.submit(_download_one, client, dests, rf, rel_path)
+        futures = [pool.submit(_download_one, client, dests, rf, rel_path, inflight)
                    for rf, rel_path in pending]
         for fut in as_completed(futures):
             rf, rel_path, size, sha, err = fut.result()
