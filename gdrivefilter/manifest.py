@@ -91,7 +91,10 @@ class Manifest:
             "entries": [asdict(e) for e in self.entries.values()],
         }
         tmp = self.path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        # Compact JSON: at 100k entries an indented manifest is 2-3x bigger and
+        # is rewritten every save_every files -- indentation costs real GB/hours.
+        tmp.write_text(json.dumps(payload, separators=(",", ":"), ensure_ascii=False),
+                       encoding="utf-8")
         tmp.replace(self.path)
 
     # ---- queries -----------------------------------------------------
@@ -122,4 +125,7 @@ class Manifest:
         if self.expected_total and self.count_done() < self.expected_total:
             return False, (f"{self.count_done()}/{self.expected_total} fichiers sauvegardés "
                            "(des fichiers attendus manquent au manifest)")
+        if not self.expected_total:
+            # Legacy manifest without the walk total: cannot prove completeness.
+            return True, "complet (manifest sans total attendu -- non prouvable)"
         return True, "complet"

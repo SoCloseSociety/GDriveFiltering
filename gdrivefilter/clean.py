@@ -5,8 +5,9 @@ It refuses to run unless:
   2. A verified external mirror exists (require_external), AND
   3. The caller passes confirm=True (the CLI maps this to
      --i-have-a-verified-backup).
-Even then, it only removes files explicitly listed as duplicates in a dedup
-report, and only from the reorganized COPY -- never from the source mirror.
+Even then, it only deletes inside `_quarantine/` of the reorganized COPY
+(where reorganize routes duplicates and junk) -- never the source mirror,
+never the kept files, which live outside the quarantine folder.
 """
 from __future__ import annotations
 
@@ -33,9 +34,13 @@ class PurgeResult:
 
 
 def purge_duplicates(cfg: Config, primary_dir: Path, external_dir: Path | None,
-                     target_tree: Path, dedup: DedupReport, confirm: bool,
-                     dry_run: bool = True) -> PurgeResult:
-    """Delete duplicate files from `target_tree` only, after passing every gate."""
+                     target_tree: Path, dedup: DedupReport | None = None,
+                     confirm: bool = False, dry_run: bool = True) -> PurgeResult:
+    """Delete everything under target_tree/_quarantine, after passing every gate.
+
+    `dedup` is accepted for API compatibility but unused: quarantine membership
+    (decided by reorganize) is the single source of truth for what is deletable.
+    """
     target_tree = Path(target_tree).resolve()
     primary_dir = Path(primary_dir).resolve()
 

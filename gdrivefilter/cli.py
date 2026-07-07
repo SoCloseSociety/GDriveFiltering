@@ -72,13 +72,22 @@ def cmd_status(cfg, args) -> int:
     try:
         while True:
             snap = read_snapshot(d)
+            if snap is None:  # backup dir vanished mid-watch
+                print("\nManifest introuvable -- arrêt du suivi.")
+                return 1
             now = _t.monotonic()
             rate = snap.rate_bps
             if prev_bytes is not None and now > prev_t:
                 rate = (snap.bytes_written - prev_bytes) / (now - prev_t)
             print("\r" + format_line(snap, rate).ljust(112), end="", flush=True)
-            if snap.expected and snap.done >= snap.expected:
-                print("\nBackup complet.")
+            # Terminate on completion INCLUDING errored files (they won't retry
+            # in this run); report the errors instead of spinning forever.
+            if snap.expected and snap.done + snap.errors >= snap.expected:
+                if snap.errors:
+                    print(f"\nBackup terminé avec {snap.errors} erreur(s) -- "
+                          "relance `backup` pour réessayer.")
+                else:
+                    print("\nBackup complet.")
                 break
             prev_bytes, prev_t = snap.bytes_written, now
             _t.sleep(args.interval)
@@ -246,10 +255,7 @@ def cmd_propose(cfg, args) -> int:
 
 def cmd_purge(cfg, args) -> int:
     from .clean import PurgeRefused, purge_duplicates
-    from .dedup import find_exact_duplicates
     primary = Path(args.primary).resolve()
-    manifest = Manifest.load(primary / "manifest.json")
-    dedup = find_exact_duplicates(manifest)
     # Derive the external mirror's matching timestamped subdir from the primary path.
     ext = None
     if cfg.backup_mirror_ext:
@@ -257,9 +263,11 @@ def cmd_purge(cfg, args) -> int:
             rel = primary.relative_to(cfg.backup_root.resolve())
             ext = cfg.backup_mirror_ext / rel
         except ValueError:
-            ext = cfg.backup_mirror_ext
+            print("PURGE REFUSÉE -- --primary doit pointer dans BACKUP_ROOT "
+                  f"({cfg.backup_root}), pas ailleurs: {primary}")
+            return 3
     try:
-        res = purge_duplicates(cfg, primary, ext, Path(args.dest), dedup,
+        res = purge_duplicates(cfg, primary, ext, Path(args.dest),
                                confirm=args.i_have_a_verified_backup, dry_run=not args.apply)
     except PurgeRefused as e:
         print(f"PURGE REFUSÉE -- {e}")

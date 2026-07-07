@@ -54,13 +54,19 @@ def verify_backup(backup_dir: Path, check_hash: bool = True,
     for e in manifest.done_entries():
         rep.total += 1
         path = backup_dir / e.rel_path
-        if not path.is_file():
-            rep.missing.append(e.rel_path)
-            continue
-        if path.stat().st_size != e.size:
-            rep.size_mismatch.append(e.rel_path)
-            continue
-        if check_hash and e.sha256 and sha256_file(path) != e.sha256:
+        try:
+            if not path.is_file():
+                rep.missing.append(e.rel_path)
+                continue
+            if path.stat().st_size != e.size:
+                rep.size_mismatch.append(e.rel_path)
+                continue
+            if check_hash and e.sha256 and sha256_file(path) != e.sha256:
+                rep.hash_mismatch.append(e.rel_path)
+                continue
+        except OSError:
+            # Unreadable (bad sector, disconnected mirror): a verification
+            # failure to record, never a crash.
             rep.hash_mismatch.append(e.rel_path)
             continue
         rep.ok += 1

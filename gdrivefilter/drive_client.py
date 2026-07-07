@@ -149,6 +149,14 @@ def _download_to_fileobj(request, fileobj, downloader_cls) -> None:
         _, done = _retry(lambda: downloader.next_chunk())
 
 
+def _is_rate_limit_403(e) -> bool:
+    """True only for retryable 403s (rate/quota); permission-style 403s are permanent."""
+    blob = (str(getattr(e, "reason", "")) + str(getattr(e, "content", b""))).lower()
+    return any(k in blob for k in
+               ("ratelimitexceeded", "userratelimitexceeded",
+                "quotaexceeded", "dailylimitexceeded", "sharinglimitexceeded"))
+
+
 def _retry(fn, attempts: int = 6, base: float = 1.5):
     """Exponential backoff for 429/5xx (quota) AND network stalls/timeouts."""
     import socket
@@ -161,6 +169,8 @@ def _retry(fn, attempts: int = 6, base: float = 1.5):
         except HttpError as e:  # pragma: no cover - network dependent
             status = getattr(e, "status_code", None) or getattr(e.resp, "status", 0)
             last = e
+            if status == 403 and not _is_rate_limit_403(e):
+                raise  # permanent 403 (abusive-file, no-download permission): no retry
             if status in (403, 429, 500, 502, 503, 504):
                 wait = base ** i
                 log.warning("Drive %s -- retry dans %.1fs (%d/%d)", status, wait, i + 1, attempts)
@@ -234,12 +244,46 @@ class DriveClient:
                 break
         return files
 
+    def _expand_folders(self, roots: list[dict]) -> list[dict]:
+        """BFS-list the contents of folders. Needed for 'Shared with me':
+        the API returns only DIRECTLY shared items -- children of a shared
+        folder appear in no corpus unless the user already opened them."""
+        out: list[dict] = []
+        queue = [f["id"] for f in roots if f.get("mimeType") == _FOLDER_MIME]
+        seen_folders: set[str] = set(queue)
+        while queue:
+            fid = queue.pop()
+            page = None
+            while True:
+                resp = self.backend.files_list(
+                    pageToken=page, pageSize=1000,
+                    fields=f"nextPageToken, files({_FILE_FIELDS})",
+                    supportsAllDrives=True, includeItemsFromAllDrives=True,
+                    q=f"'{fid}' in parents and trashed = false",
+                )
+                for child in resp.get("files", []):
+                    out.append(child)
+                    cid = child["id"]
+                    if child.get("mimeType") == _FOLDER_MIME and cid not in seen_folders:
+                        seen_folders.add(cid)
+                        queue.append(cid)
+                page = resp.get("nextPageToken")
+                if not page:
+                    break
+        return out
+
     def walk(self) -> Iterator[RemoteFile]:
         """Yield every downloadable file across all sources, deduped by file_id."""
         seen: set[str] = set()
         for source in self._sources():
             log.info("Source: %s ...", source.get("name", "?"))
             raw = self._list_source(source)
+            if source.get("shared_with_me"):
+                extra = self._expand_folders(raw)
+                if extra:
+                    log.info("  ... +%d éléments dans les dossiers partagés", len(extra))
+                known = {f["id"] for f in raw}
+                raw += [f for f in extra if f["id"] not in known]
             log.info("Source: %s -> %d éléments", source.get("name", "?"), len(raw))
             by_id = {f["id"]: f for f in raw}
             for f in raw:

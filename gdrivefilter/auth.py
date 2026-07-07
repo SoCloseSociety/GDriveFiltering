@@ -35,7 +35,18 @@ _SUCCESS_HTML = (
 )
 
 
-class _DualStackServer(HTTPServer):
+class _QuietBindMixin:
+    """Bind WITHOUT BaseHTTPServer's socket.getfqdn() reverse-DNS lookup, which
+    can hang for many seconds on some networks (notably macOS CI runners)."""
+
+    def server_bind(self):  # noqa: D102 - stdlib override
+        import socketserver
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = "localhost"
+        self.server_port = self.server_address[1]
+
+
+class _DualStackServer(_QuietBindMixin, HTTPServer):
     """HTTP server accepting both IPv4 and IPv6 loopback (127.0.0.1 and ::1)."""
     address_family = socket.AF_INET6
     allow_reuse_address = True
@@ -46,6 +57,10 @@ class _DualStackServer(HTTPServer):
         except (OSError, AttributeError):
             pass
         super().server_bind()
+
+
+class _IPv4Server(_QuietBindMixin, HTTPServer):
+    allow_reuse_address = True
 
 
 def _make_server(port: int, result: dict) -> HTTPServer:
@@ -72,7 +87,7 @@ def _make_server(port: int, result: dict) -> HTTPServer:
         return _DualStackServer(("::", port), Handler)
     except OSError:
         # No IPv6 available -> fall back to IPv4-only.
-        return HTTPServer(("127.0.0.1", port), Handler)
+        return _IPv4Server(("127.0.0.1", port), Handler)
 
 
 def capture_loopback_code(port: int, on_ready=None, timeout: float = 300.0) -> dict:
@@ -135,9 +150,15 @@ def get_credentials(cfg: Config, account: str = "default"):
     tok = _token_path(cfg, account)
     creds = None
     if tok.is_file():
-        creds = Credentials.from_authorized_user_info(
-            json.loads(tok.read_text(encoding="utf-8")), cfg.scope
-        )
+        info = json.loads(tok.read_text(encoding="utf-8"))
+        granted = set(info.get("scopes") or [])
+        if granted and granted != set(cfg.scope):
+            # Scope changed (e.g. readonly <-> full): the cached token no longer
+            # matches what the tool advertises -- force a fresh consent.
+            log.info("Scope du token (%s) != scope configuré (%s) -- reconsent.",
+                     ",".join(sorted(granted)), ",".join(cfg.scope))
+        else:
+            creds = Credentials.from_authorized_user_info(info, cfg.scope)
     if creds and creds.valid:
         return creds
     if creds and creds.expired and creds.refresh_token:

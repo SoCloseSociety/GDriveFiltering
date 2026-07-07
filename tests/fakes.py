@@ -15,12 +15,14 @@ class FakeBackend:
 
     def __init__(self, files_by_drive: dict, shared_drives: list[dict],
                  content: dict, exports: dict | None = None,
-                 shared_with_me: list[dict] | None = None):
+                 shared_with_me: list[dict] | None = None,
+                 children: dict | None = None):
         self.files_by_drive = files_by_drive
         self.shared_drives = shared_drives
         self.content = content
         self.exports = exports or {}
         self.shared_with_me = shared_with_me or []
+        self.children = children or {}  # folder_id -> [file dicts]
         self.download_calls: list[str] = []
         self.export_calls: list[str] = []
 
@@ -29,6 +31,9 @@ class FakeBackend:
 
     def files_list(self, **params) -> dict:
         q = params.get("q", "")
+        if "in parents" in q:
+            fid = q.split("'")[1]
+            return {"files": list(self.children.get(fid, []))}
         if "sharedWithMe" in q:
             return {"files": list(self.shared_with_me)}
         if params.get("corpora") == "drive":
