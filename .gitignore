@@ -1,0 +1,29 @@
+# Secrets & credentials — NEVER commit
+.env
+.env.*
+!.env.example
+.tokens/
+*token*.json
+*service-account*.json
+client_secret*.json
+credentials*.json
+
+# Backups, local data, dashboards
+backups/
+_clean/
+.dashboard/
+*.manifest.json
+progress.json
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# OS
+.DS_Store
+Thumbs.db
