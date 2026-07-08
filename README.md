@@ -9,7 +9,7 @@ A fast, resumable, read-only Google Drive backup and cleanup tool in Python, wit
 <p>
 <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-blue">
 <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green">
-<img alt="Tests" src="https://img.shields.io/badge/tests-73%20passing-brightgreen">
+<img alt="Tests" src="https://img.shields.io/badge/tests-74%20passing-brightgreen">
 <img alt="Read-only" src="https://img.shields.io/badge/Drive-read--only-success">
 </p>
 
@@ -111,7 +111,7 @@ Google Drive (My Drive + Shared Drives + Shared with me)
 ## Tests
 
 ```bash
-make test      # 73 tests, no network — a fake Drive API covers the pipeline
+make test      # 74 tests, no network — a fake Drive API covers the pipeline
 ```
 
 ## Contributing

@@ -115,16 +115,29 @@ class Manifest:
         return len(self.done_entries())
 
     def failed_entries(self) -> list[Entry]:
-        return [e for e in self.entries.values() if e.status != "done"]
+        return [e for e in self.entries.values()
+                if e.status not in ("done", "restricted")]
+
+    def restricted_entries(self) -> list[Entry]:
+        """Files Drive permanently refuses to serve (view-only shares, flagged
+        content): impossible to back up by nature, accounted for separately so
+        they never block completeness -- but reported, never silent."""
+        return [e for e in self.entries.values() if e.status == "restricted"]
 
     def is_complete(self) -> tuple[bool, str]:
-        """A backup is complete only if every expected file downloaded OK."""
+        """Complete = every expected file is either downloaded OK or provably
+        un-downloadable (restricted). Real failures always block."""
         failed = self.failed_entries()
         if failed:
             return False, f"{len(failed)} fichier(s) en échec/incomplets"
-        if self.expected_total and self.count_done() < self.expected_total:
-            return False, (f"{self.count_done()}/{self.expected_total} fichiers sauvegardés "
+        n_restricted = len(self.restricted_entries())
+        accounted = self.count_done() + n_restricted
+        if self.expected_total and accounted < self.expected_total:
+            return False, (f"{accounted}/{self.expected_total} fichiers sauvegardés "
                            "(des fichiers attendus manquent au manifest)")
+        if n_restricted:
+            return True, (f"complet ({n_restricted} fichier(s) 'restricted' "
+                          "intéléchargeables par Drive, listés dans le rapport)")
         if not self.expected_total:
             # Legacy manifest without the walk total: cannot prove completeness.
             return True, "complet (manifest sans total attendu -- non prouvable)"

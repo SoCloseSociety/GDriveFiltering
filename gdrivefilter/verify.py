@@ -25,6 +25,7 @@ class VerifyReport:
     hash_mismatch: list[str] = field(default_factory=list)
     complete: bool = True          # every expected file downloaded OK
     complete_reason: str = "complet"
+    restricted: int = 0            # un-downloadable by Drive (reported, non-blocking)
 
     @property
     def clean(self) -> bool:
@@ -51,6 +52,7 @@ def verify_backup(backup_dir: Path, check_hash: bool = True,
         manifest = Manifest.load(backup_dir / "manifest.json")
     rep = VerifyReport(backup_dir)
     rep.complete, rep.complete_reason = manifest.is_complete()
+    rep.restricted = len(manifest.restricted_entries())
     for e in manifest.done_entries():
         rep.total += 1
         path = backup_dir / e.rel_path

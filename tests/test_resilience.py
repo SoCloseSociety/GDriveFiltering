@@ -73,6 +73,40 @@ def test_incomplete_read_is_retried(cfg):
     assert (cfg.backup_root / "IR/default/My Drive/pod.mp4").read_bytes() == b"VIDEODATA"
 
 
+def test_permanent_403_becomes_restricted_not_blocking(cfg):
+    """View-only / flagged files (permanent 403) must not block completeness:
+    recorded as 'restricted', reported, retried on future resumes."""
+    class Fake403(Exception):
+        status_code = 403
+        reason = "cannotDownloadAbusiveFile"
+
+    class RestrictedBackend(FlakyBackend):
+        def download_to(self, file_id, fileobj):
+            if file_id == self.fail_id:
+                raise Fake403("forbidden")
+            return FakeBackend.download_to(self, file_id, fileobj)
+
+    files = [
+        {"id": "ok1", "name": "fine.bin", "mimeType": "application/octet-stream",
+         "parents": [], "size": "3", "modifiedTime": "2023-01-01T00:00:00Z",
+         "owners": [{"emailAddress": "m@x.c"}]},
+        {"id": "v1", "name": "viewonly.pdf", "mimeType": "application/pdf",
+         "parents": [], "size": "9", "modifiedTime": "2023-01-01T00:00:00Z",
+         "owners": [{"emailAddress": "m@x.c"}]},
+    ]
+    be = RestrictedBackend(files_by_drive={"": files}, shared_drives=[],
+                           content={"ok1": b"AAA", "v1": b"NEVER"}, exports={})
+    res = run_backup(cfg, DriveClient(be), account="default", timestamp="R403", workers=2)
+    assert res.downloaded == 1 and res.restricted == 1 and res.errors == 0
+
+    m = Manifest.load(cfg.backup_root / "R403/default/manifest.json")
+    complete, reason = m.is_complete()
+    assert complete and "restricted" in reason          # accounted, not blocking
+    from gdrivefilter.verify import verify_backup
+    rep = verify_backup(cfg.backup_root / "R403/default")
+    assert rep.clean and rep.restricted == 1            # surfaced in the report
+
+
 def test_permanent_failure_is_reported_not_infinite(cfg):
     files = [{"id": "v1", "name": "bad.MP4", "mimeType": "video/mp4", "parents": [],
               "size": "9", "modifiedTime": "2023-01-01T00:00:00Z",

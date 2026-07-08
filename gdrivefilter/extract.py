@@ -38,6 +38,7 @@ class BackupResult:
     errors: int = 0
     repaired: int = 0        # done files re-mirrored to a destination missing them
     imported: int = 0        # unchanged files copied locally from a previous backup
+    restricted: int = 0      # files Drive permanently refuses to serve (view-only)
     bytes_written: int = 0
     error_samples: list[str] = field(default_factory=list)
 
@@ -176,6 +177,15 @@ def _download_one(client: DriveClient, dests: list[Path], rf: RemoteFile, rel_pa
                 client.reset_connection()  # transient: fresh connection, retry the file
                 time.sleep(1.5 * (attempt + 1))
             except Exception as e:  # noqa: BLE001 - non-network: don't retry, report
+                status = (getattr(e, "status_code", None)
+                          or getattr(getattr(e, "resp", None), "status", None))
+                if status == 403:
+                    from .drive_client import _is_rate_limit_403
+                    if not _is_rate_limit_403(e):
+                        # Permanently un-downloadable (view-only share, flagged
+                        # file): distinct outcome so completeness isn't blocked.
+                        last = "restricted: " + str(e)[:200]
+                        break
                 last = str(e)
                 break
         try:
@@ -378,7 +388,7 @@ def _run_backup_locked(cfg: Config, client: DriveClient, account: str,
     # (deleted/unshared since the failed attempt): they can never be retried
     # and would otherwise keep the backup "incomplete" forever.
     listed_ids = {f.file_id for f in files}
-    stale = [e.file_id for e in manifest.failed_entries()
+    stale = [e.file_id for e in (manifest.failed_entries() + manifest.restricted_entries())
              if e.file_id and e.file_id not in listed_ids]
     for fid in stale:
         del manifest.entries[fid]
@@ -469,6 +479,15 @@ def _run_backup_locked(cfg: Config, client: DriveClient, account: str,
                 ))
                 result.downloaded += 1
                 result.bytes_written += size
+            elif err.startswith("restricted:"):
+                result.restricted += 1
+                manifest.upsert(Entry(
+                    file_id=rf.file_id, name=rf.name, rel_path=rel_path,
+                    mime_type=rf.mime_type, size=rf.size, drive_id=rf.drive_id,
+                    drive_name=rf.drive_name, owner=rf.owner, modified_time=rf.modified_time,
+                    status="restricted", error=err,
+                ))
+                log.info("Intéléchargeable (403 permanent): %s", rel_path)
             else:
                 result.errors += 1
                 if len(result.error_samples) < 10:
