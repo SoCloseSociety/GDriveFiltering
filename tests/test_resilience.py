@@ -49,6 +49,30 @@ def test_large_file_recovers_from_connection_drop(cfg):
     assert Manifest.load(primary / "manifest.json").count_done() == 1
 
 
+def test_incomplete_read_is_retried(cfg):
+    """http.client.IncompleteRead (server drops mid-stream) must be transient:
+    retried with a fresh connection, not recorded as a permanent error."""
+    import http.client
+
+    class IncompleteReadBackend(FlakyBackend):
+        def download_to(self, file_id, fileobj):
+            if file_id == self.fail_id:
+                self.attempts += 1
+                if self.attempts <= self.fail_until:
+                    fileobj.write(b"PART")
+                    raise http.client.IncompleteRead(b"PART", expected=5)
+            return FakeBackend.download_to(self, file_id, fileobj)
+
+    files = [{"id": "v1", "name": "pod.mp4", "mimeType": "video/mp4", "parents": [],
+              "size": "9", "modifiedTime": "2023-01-01T00:00:00Z",
+              "owners": [{"emailAddress": "me@x.c"}]}]
+    be = IncompleteReadBackend(files_by_drive={"": files}, shared_drives=[],
+                               content={"v1": b"VIDEODATA"}, exports={}, fail_until=2)
+    res = run_backup(cfg, DriveClient(be), account="default", timestamp="IR", workers=2)
+    assert res.downloaded == 1 and res.errors == 0
+    assert (cfg.backup_root / "IR/default/My Drive/pod.mp4").read_bytes() == b"VIDEODATA"
+
+
 def test_permanent_failure_is_reported_not_infinite(cfg):
     files = [{"id": "v1", "name": "bad.MP4", "mimeType": "video/mp4", "parents": [],
               "size": "9", "modifiedTime": "2023-01-01T00:00:00Z",

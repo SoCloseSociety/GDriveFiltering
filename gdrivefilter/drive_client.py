@@ -159,7 +159,9 @@ def _is_rate_limit_403(e) -> bool:
 
 def _retry(fn, attempts: int = 6, base: float = 1.5):
     """Exponential backoff for 429/5xx (quota) AND network stalls/timeouts."""
+    import http.client
     import socket
+    import ssl
 
     from googleapiclient.errors import HttpError
     last = None
@@ -177,7 +179,8 @@ def _retry(fn, attempts: int = 6, base: float = 1.5):
                 time.sleep(wait)
                 continue
             raise
-        except (socket.timeout, TimeoutError, ConnectionError, BrokenPipeError) as e:  # pragma: no cover
+        except (socket.timeout, TimeoutError, ConnectionError, BrokenPipeError,
+                ssl.SSLError, http.client.HTTPException) as e:  # pragma: no cover
             last = e
             wait = base ** i
             log.warning("Réseau %s -- retry dans %.1fs (%d/%d)",

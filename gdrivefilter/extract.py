@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import http.client
 import os
 import shutil
+import ssl
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -115,7 +117,10 @@ class _HashingWriter:
 
 
 # Transient network drops that warrant a full-file retry with a fresh connection.
-_NET_ERRORS = (ConnectionError, TimeoutError, OSError)
+# http.client.HTTPException covers mid-stream server drops (IncompleteRead,
+# BadStatusLine, RemoteDisconnected...) -- Drive API errors arrive as
+# googleapiclient HttpError, never as these, so they are all connection-level.
+_NET_ERRORS = (ConnectionError, TimeoutError, OSError, http.client.HTTPException)
 # Local-filesystem failures that retrying can never fix (disk full, drive
 # unmounted, permissions, read-only FS): fail fast instead of 4 retry cycles.
 _FATAL_ERRNOS = {errno.ENOSPC, errno.ENOENT, errno.EACCES, errno.EROFS, errno.EDQUOT}
@@ -123,7 +128,8 @@ _FILE_ATTEMPTS = 4
 
 
 def _is_transient(e: BaseException) -> bool:
-    if isinstance(e, (ConnectionError, TimeoutError)):
+    if isinstance(e, (ConnectionError, TimeoutError, ssl.SSLError,
+                      http.client.HTTPException)):
         return True
     if isinstance(e, OSError):
         return e.errno not in _FATAL_ERRNOS
