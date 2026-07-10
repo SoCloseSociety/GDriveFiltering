@@ -1,112 +1,155 @@
-# GDriveFiltering
+<p align="center">
+  <img src="desktop/logo.svg" width="132" alt="GDriveFiltering logo">
+</p>
 
-Backup complet de tes Google Drive (My Drive + Shared Drives + éléments partagés) en local
-(PC + disque dur externe), puis vérification, dédup, réorganisation propre -- **sans jamais
-rien supprimer avant qu'une backup vérifiée existe**.
+<h1 align="center">GDriveFiltering</h1>
 
-## Contrat de sécurité
-- Extraction **READ-ONLY** sur Google Drive (scope `drive.readonly`). Le code ne peut pas
-  modifier ou supprimer quoi que ce soit sur Drive.
-- **Preflight disque** : avant d'extraire, on compare la taille du Drive à l'espace libre.
-  Si ça ne rentre pas, le programme **s'arrête et te demande de brancher un disque dur**.
-- Dédup / réorg = **détection + rapport + quarantaine dans une COPIE**. Jamais de suppression.
-- La seule commande qui peut supprimer (`purge`) **refuse** de tourner sans miroir principal
-  + miroir externe **vérifiés** (sha256) et un flag explicite, et n'agit que sur la COPIE.
+<p align="center">
+  <b>Back up your entire Google Drive locally — My Drive, Shared Drives and "Shared with me" —
+  then verify, deduplicate and reorganize it into a clean tree. Nothing is ever deleted before a verified backup exists.</b>
+</p>
 
-## Installation
+<p align="center">
+  <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-blue">
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-75%20passing-brightgreen">
+  <img alt="CI" src="https://img.shields.io/badge/CI-Ubuntu%20%26%20macOS-success">
+  <img alt="Read-only" src="https://img.shields.io/badge/Drive-read--only-success">
+</p>
+
+A fast, resumable, read-only Google Drive backup and cleanup tool in Python, with a native
+desktop app and a live local dashboard. Ideal for archiving a large Drive to an external disk,
+migrating accounts, or de-cluttering years of files — safely.
+
+![GDriveFiltering dashboard](docs/dashboard.svg)
+
+---
+
+## Why
+
+Google Takeout is a one-shot ZIP with no dedup, no structure, and no resume. `rclone` mirrors
+bytes but won't tell you what's junk, what's duplicated, or how to reorganize it.
+**GDriveFiltering** is built for a real, large Drive (100k+ files, hundreds of GB):
+
+- **Complete coverage** — My Drive **+ every Shared Drive + "Shared with me"** (including the
+  contents of shared folders, listed recursively).
+- **Read-only on Drive** — requests the `drive.readonly` scope. It physically cannot modify or
+  delete anything in your Drive.
+- **Incremental** — a new backup reuses unchanged files from the previous one via hash-verified
+  local copies. Zero re-download of data already on the drive.
+- **Safe by construction** — disk-space preflight, unplugged-drive guard, SHA-256 + completeness
+  verification. Nothing is deleted until a verified primary **and** external backup exist; dedup
+  and cleanup only *detect, report and quarantine* into a **copy**.
+- **Understands your files** — exact (SHA-256) + optional semantic (local Ollama) duplicate
+  detection, junk filtering, and a clean-tree proposal with an **editable plan**.
+- **Desktop app + live dashboard** — a native window (or your browser) with progress, ETA,
+  a guided funnel and one-click actions.
+
+## Desktop app (macOS / Windows)
+
+Double-clickable — no terminal.
+
 ```bash
-make setup        # crée .venv et installe les dépendances
-cp .env.example .env   # ajuste au besoin (les creds Google sont auto-détectés)
-make doctor       # vérifie creds, espace disque, Ollama
+make app        # macOS: builds ~/Desktop/GDriveFiltering.app (native window, icon included)
 ```
 
-## Utilisation (dans l'ordre)
-```bash
-# 1. Authentifier un compte Google (consent dans le navigateur, une seule fois)
-make auth ACCOUNT=perso
-
-# 2. Backup READ-ONLY de tous les drives (preflight disque inclus)
-make backup ACCOUNT=perso
-
-# 2b. Suivre la progression en direct (barre + ETA), pendant que le backup tourne
-python -m gdrivefilter status --account perso --watch
-
-# 3. Vérifier l'intégrité (count + taille + sha256)
-make verify DIR=backups/AAAAMMJJ_HHMMSS/perso
-
-# 3b. Proposer le clean tree final (rapport texte + JSON + dashboard HTML), sans rien écrire
-python -m gdrivefilter propose --account perso   # -> reports/proposal.(txt|json|html)
-
-# 4. Détecter les doublons (aucune suppression). --semantic ajoute Ollama bge-m3
-make dedup DIR=backups/AAAAMMJJ_HHMMSS/perso SEMANTIC=1
-
-# 5. Réorganiser en COPIE dans une arbo propre (par catégorie/année)
-make reorganize DIR=backups/AAAAMMJJ_HHMMSS/perso DEST=clean/perso
-
-# 6. (Optionnel, ultra-gardé) purger les doublons dans la COPIE
-#    dry-run par défaut ; APPLY=1 pour supprimer réellement
-make purge DIR=backups/AAAAMMJJ_HHMMSS/perso DEST=clean/perso        # dry-run
-make purge DIR=backups/AAAAMMJJ_HHMMSS/perso DEST=clean/perso APPLY=1
-```
-
-Multi-comptes : relance `auth` + `backup` avec un `ACCOUNT` différent.
-
-### Reprise & performance
-- **Reprise automatique** : relancer `backup` reprend le dernier backup INCOMPLET du compte
-  (saute ce qui est déjà fait). `--new` force un nouveau backup.
-- **Téléchargements parallèles** : `DOWNLOAD_WORKERS` (défaut 8) contrôle la concurrence.
-  Monter à 16 sature mieux la bande passante sur les gros volumes; baisser si quotas API.
-- **100% resumable** : coupure/veille/débranchement -> relancer la même commande reprend.
-
-## Credentials
-Aucun projet GCP à créer. Les `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` sont réutilisés
-depuis les projets voisins (`KontentReachDash`, `clip-generator-local`) si absents du `.env`
-local. Si Google renvoie `redirect_uri_mismatch`, ajoute `http://localhost:8765/` aux redirect
-URIs autorisés du client OAuth (voir `OAUTH_LOOPBACK_PORT`).
-
-## Tests
-```bash
-make test    # 21 tests, aucun accès réseau (fake Drive API)
-```
-
-## Application de bureau (Mac / Windows)
-Un lanceur double-cliquable qui démarre le dashboard et l'ouvre — sans terminal.
-```bash
-make app        # macOS: crée ~/Desktop/GDriveFiltering.app (icône incluse)
-```
-Windows : `desktop/windows/GDriveFiltering.vbs` (raccourci sur le Bureau). Détails dans
+Windows: run `desktop/windows/GDriveFiltering.vbs` (make a Desktop shortcut). See
 [desktop/README.md](desktop/README.md).
 
-## Dashboard & suivi (monitoring + quick actions)
-```bash
-python -m gdrivefilter dashboard          # http://127.0.0.1:8787 (s'ouvre tout seul)
-```
-Dashboard web local (127.0.0.1 uniquement) : progression live par compte (barre + ETA + débit),
-répartition par catégorie/source/année, doublons et junk, et **quick actions** (résumer backup,
-vérifier, proposer le clean tree, dédup, réorg dry-run, ouvrir le dossier). La suppression
-(`purge`) n'y est **pas** exposée -- action destructive réservée à la ligne de commande gardée.
+## Safety model
 
-## Robustesse (gros volumes)
-- **Parallélisme** (`DOWNLOAD_WORKERS`) + **streaming disque** (mémoire bornée, gros fichiers OK).
-- **Timeout socket + retry réseau** : un téléchargement bloqué est réessayé, jamais de hang.
-- **Reprise automatique** du dernier backup incomplet ; **heartbeat** pour un suivi fiable.
-- **exFAT/insensible à la casse** géré (chemins uniques casefold, noms sûrs FAT).
-
-## Architecture
-| Module | Rôle |
+| Guarantee | How |
 |---|---|
-| `config.py` | Config + résolution des creds depuis les .env voisins |
-| `auth.py` | OAuth loopback, token par compte, refresh |
-| `drive_client.py` | Drive v3 all-drives, export des fichiers Google natifs |
-| `preflight.py` | Contrôle d'espace disque (stop + demande de disque dur) |
-| `extract.py` | Backup resumable, multi-destinations, READ-ONLY |
-| `manifest.py` | Index sha256 + point de reprise |
-| `verify.py` | Vérif intégrité + **gate de sécurité** |
-| `dedup.py` | Doublons exacts (hash) + sémantiques (Ollama) |
-| `filters.py` | Détection junk/clutter (système, temp, fichiers vides) |
-| `propose.py` | Analyse + proposition du clean tree (texte/JSON/HTML) |
-| `reorganize.py` | Arbo propre en COPIE, quarantaine (doublons + junk) |
-| `clean.py` | `purge` ultra-gardé (seule voie de suppression) |
-| `progress.py` | Heartbeat + snapshots pour `status`/dashboard |
-| `dashboard.py` | Dashboard web local (monitoring + quick actions) |
-| `ollama_client.py` | LLM/embeddings locaux (RTX 4070), dégradation gracieuse |
+| Never modifies your Drive | `drive.readonly` OAuth scope |
+| Never deletes before a backup exists | destructive `purge` refuses without a verified primary + external mirror |
+| Never fills the wrong disk | refuses to run if the external volume is unplugged |
+| Never loses data to name clashes | case-insensitive unique local paths (exFAT/APFS/NTFS safe) |
+| Never reports an incomplete backup as done | verify checks count **and** per-file SHA-256; a circuit breaker aborts on outages |
+| Reorg never touches the source | it writes a **new copy**; duplicates/junk go to `_quarantine/` |
+
+## Quick start
+
+```bash
+git clone https://github.com/SoCloseSociety/GDriveFiltering.git
+cd GDriveFiltering
+make setup                      # venv + dependencies
+cp .env.example .env            # then add your Google OAuth client id/secret
+```
+
+Create an OAuth client of type **Desktop app** in the
+[Google Cloud Console](https://console.cloud.google.com/apis/credentials) with the **Google Drive
+API** enabled, and paste the ID/secret into `.env`.
+
+```bash
+python -m gdrivefilter doctor                 # check config, disk, Ollama
+python -m gdrivefilter auth --account me      # one-time browser consent (read-only)
+python -m gdrivefilter backup --account me    # resumable, parallel, incremental, read-only
+python -m gdrivefilter status --account me --watch   # live progress bar + ETA
+python -m gdrivefilter propose --account me   # clean-tree proposal + editable plan.csv
+python -m gdrivefilter app                    # native desktop window (or `dashboard` for browser)
+```
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `doctor` | Check credentials, disk space and Ollama availability |
+| `auth` | One-time OAuth consent (loopback, dual-stack IPv4/IPv6) |
+| `backup` | Mirror all drives locally — read-only, parallel, **resumable & incremental** |
+| `status [--watch]` | Live progress: bar, %, GB, throughput, ETA |
+| `app` / `dashboard` | Native window / browser control panel (monitoring + quick actions) |
+| `verify` | Re-check a backup: count + size + SHA-256 |
+| `dedup` | Detect exact (and optional semantic) duplicates — report only |
+| `propose` | Analyze the backup, propose a clean tree + editable `plan.csv` |
+| `reorganize [--plan]` | Build a clean categorized tree **as a copy** (or apply your edited plan) |
+| `purge` | Delete duplicates from the copy — ultra-guarded, opt-in |
+
+## How it works
+
+```
+Google Drive (My Drive + Shared Drives + Shared with me)
+      │  Drive API v3 · read-only
+      ▼
+ extract ──► local mirror (+ optional external mirror), resumable & incremental
+      ▼
+ verify ──► SHA-256 + completeness gate
+      ▼
+ dedup + filter ──► exact/semantic duplicates, junk detection (report only)
+      ▼
+ propose / reorganize ──► clean tree by category/year (or your edited plan), as a COPY
+```
+
+- **Manifest** — a JSON index (SHA-256, size, path, mime, owner, drive) that doubles as the resume log.
+- **Streaming** — files stream to disk in chunks, so memory stays bounded even for multi-GB videos.
+- **Parallel** — a configurable thread pool (`DOWNLOAD_WORKERS`) with a thread-local Drive client,
+  network-timeout retries, connection-drop self-heal and a systemic-outage circuit breaker.
+- **Ollama-first** — optional semantic dedup/classification runs on a local model; degrades
+  gracefully if Ollama isn't running.
+
+## Requirements
+
+- Python 3.11+
+- A Google Cloud OAuth client (Desktop app) with the Drive API enabled
+- Optional: [Ollama](https://ollama.com) for semantic dedup (`bge-m3`) and classification
+- Optional: `pywebview` (installed on demand by the desktop app) for the native window
+
+## Tests
+
+```bash
+make test      # 75 tests, no network — a fake Drive API covers the whole pipeline
+```
+
+## Contributing
+
+Issues and PRs welcome. The whole download/dedup/reorg pipeline is covered by a fake Drive
+backend, so you can develop and test offline.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+---
+
+<sub>Keywords: google drive backup, download entire google drive, shared drive backup, google drive
+deduplication, reorganize google drive, incremental drive backup, python google drive cli,
+resumable drive backup, local drive archive, self-hosted.</sub>

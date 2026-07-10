@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" width="256" height="256" role="img" aria-label="GDriveFiltering">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7c5cff"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+  <rect x="78" y="78" width="844" height="844" rx="232" fill="url(#g)"/>
+  <g fill="#f8faff">
+    <polygon points="250,322 750,322 590,560 590,770 410,770 410,560"/>
+    <circle cx="362" cy="250" r="46"/>
+    <circle cx="500" cy="226" r="50"/>
+    <circle cx="638" cy="250" r="46"/>
+  </g>
+</svg>

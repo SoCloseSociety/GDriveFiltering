@@ -43,11 +43,15 @@ exec .venv/bin/python -m gdrivefilter app --port 8787 >>"\$LOG" 2>&1
 LAUNCH
 chmod +x "$APP/Contents/MacOS/GDriveFiltering"
 
-# Icon (best-effort: needs python3 + sips)
-if command -v sips >/dev/null 2>&1; then
-  python3 "$HERE/icon.py" /tmp/gdf_icon.png >/dev/null 2>&1 || true
-  [ -f /tmp/gdf_icon.png ] && sips -s format icns /tmp/gdf_icon.png \
-    --out "$APP/Contents/Resources/icon.icns" >/dev/null 2>&1 || true
+# Icon: render a multi-resolution .icns via iconutil (needs python3 + iconutil).
+if command -v iconutil >/dev/null 2>&1; then
+  ICONSET="$(mktemp -d)/GDF.iconset"; mkdir -p "$ICONSET"
+  for sz in 16 32 64 128 256 512; do
+    python3 "$HERE/icon.py" "$ICONSET/icon_${sz}x${sz}.png" "$sz" >/dev/null 2>&1 || true
+    python3 "$HERE/icon.py" "$ICONSET/icon_${sz}x${sz}@2x.png" "$((sz*2))" >/dev/null 2>&1 || true
+  done
+  iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/icon.icns" >/dev/null 2>&1 || true
+  rm -rf "$(dirname "$ICONSET")"
 fi
 touch "$APP"
 echo "Built: $APP"
