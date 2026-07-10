@@ -2,7 +2,11 @@ VENV ?= .venv
 PY := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 
-.PHONY: setup test doctor auth backup verify dedup reorganize purge
+.PHONY: setup test doctor auth backup verify dedup reorganize purge app
+
+# Build the double-clickable macOS desktop app (~/Desktop/GDriveFiltering.app)
+app:
+	./desktop/build_mac_app.sh
 
 setup:
 	python3 -m venv $(VENV)
