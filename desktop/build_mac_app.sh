@@ -24,26 +24,22 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key><string>icon</string>
   <key>LSMinimumSystemVersion</key><string>10.13</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>LSUIElement</key><true/>
 </dict></plist>
 PLIST
 
 cat > "$APP/Contents/MacOS/GDriveFiltering" <<LAUNCH
 #!/bin/bash
 PROJECT="$PROJECT"
-URL="http://127.0.0.1:8787/"
 LOG="\$HOME/Library/Logs/GDriveFiltering.log"
 mkdir -p "\$(dirname "\$LOG")"
-if /usr/bin/curl -s -o /dev/null --max-time 1 "\$URL"; then /usr/bin/open "\$URL"; exit 0; fi
 cd "\$PROJECT" || { /usr/bin/osascript -e 'display alert "GDriveFiltering" message "Project folder not found."'; exit 1; }
 if [ ! -x .venv/bin/python ]; then
   /usr/bin/python3 -m venv .venv >>"\$LOG" 2>&1
   .venv/bin/pip install -q -r requirements.txt >>"\$LOG" 2>&1
 fi
-/usr/bin/nohup .venv/bin/python -m gdrivefilter dashboard --port 8787 --no-open >>"\$LOG" 2>&1 &
-for i in \$(seq 1 30); do /usr/bin/curl -s -o /dev/null --max-time 1 "\$URL" && break; sleep 0.5; done
-/usr/bin/open "\$URL"
-exit 0
+# Native-window dependency (falls back to the browser dashboard if it fails).
+.venv/bin/python -c "import webview" 2>/dev/null || .venv/bin/pip install -q -r requirements-desktop.txt >>"\$LOG" 2>&1
+exec .venv/bin/python -m gdrivefilter app --port 8787 >>"\$LOG" 2>&1
 LAUNCH
 chmod +x "$APP/Contents/MacOS/GDriveFiltering"
 

@@ -102,6 +102,24 @@ def cmd_dashboard(cfg, args) -> int:
     return 0
 
 
+def cmd_app(cfg, args) -> int:
+    try:
+        from .nativeapp import run
+    except ImportError:
+        pass
+    else:
+        try:
+            run(cfg, port=args.port)
+            return 0
+        except ImportError:
+            pass  # pywebview (or its GUI backend) missing -> browser fallback
+    print("Fenêtre native indisponible (pywebview absent) -- "
+          "ouverture dans le navigateur.")
+    from .dashboard import serve
+    serve(cfg, port=args.port, open_browser=True)
+    return 0
+
+
 def _make_client(cfg, account: str):
     from .auth import get_credentials
     from .drive_client import DriveClient, GoogleDriveBackend
@@ -320,6 +338,9 @@ def build_parser() -> argparse.ArgumentParser:
     dash.add_argument("--port", type=int, default=8787)
     dash.add_argument("--no-open", action="store_true", help="Ne pas ouvrir le navigateur")
 
+    ap = sub.add_parser("app", help="Fenêtre d'application native (dashboard sans navigateur)")
+    ap.add_argument("--port", type=int, default=8787)
+
     a = sub.add_parser("auth", help="Consent OAuth pour un compte")
     a.add_argument("--account", default="default")
 
@@ -359,8 +380,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 _HANDLERS = {
     "doctor": cmd_doctor, "auth": cmd_auth, "backup": cmd_backup, "verify": cmd_verify,
-    "status": cmd_status, "dashboard": cmd_dashboard, "dedup": cmd_dedup,
-    "propose": cmd_propose, "reorganize": cmd_reorganize, "purge": cmd_purge,
+    "status": cmd_status, "dashboard": cmd_dashboard, "app": cmd_app,
+    "dedup": cmd_dedup, "propose": cmd_propose, "reorganize": cmd_reorganize,
+    "purge": cmd_purge,
 }
 
 

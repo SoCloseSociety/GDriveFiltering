@@ -1,0 +1,3 @@
+# Optional: native desktop window (`gdrivefilter app` / the .app launcher).
+# The dashboard itself works without this -- it just opens in the browser.
+pywebview>=5.0

@@ -1,8 +1,9 @@
 # Desktop app
 
-Double-clickable launchers that start the local dashboard (http://127.0.0.1:8787)
-and open it in your browser — no terminal needed. They run the project in place,
-using its `.venv`, `.env` and OAuth tokens.
+Double-clickable launchers that open the dashboard in a **native app window**
+(via pywebview) — no terminal, no browser tab. They run the project in place,
+using its `.venv`, `.env` and OAuth tokens. If pywebview can't load, they fall
+back to opening the dashboard in your default browser.
 
 ## macOS
 
