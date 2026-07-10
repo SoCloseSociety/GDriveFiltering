@@ -107,6 +107,29 @@ def test_permanent_403_becomes_restricted_not_blocking(cfg):
     assert rep.clean and rep.restricted == 1            # surfaced in the report
 
 
+def test_circuit_breaker_aborts_on_systemic_outage(cfg, monkeypatch):
+    """Network/DNS outage (everything failing) must abort early, not burn the
+    whole queue into tens of thousands of error entries."""
+    monkeypatch.setattr("gdrivefilter.extract.BREAKER_LIMIT", 10, raising=False)
+
+    class DeadNetworkBackend(FakeBackend):
+        def download_to(self, file_id, fileobj):
+            raise ValueError("Unable to find the server at www.googleapis.com")
+
+    n = 200
+    files = [{"id": f"f{i}", "name": f"f{i}.bin", "mimeType": "application/octet-stream",
+              "parents": [], "size": "3", "modifiedTime": "2023-01-01T00:00:00Z",
+              "owners": [{"emailAddress": "m@x.c"}]} for i in range(n)]
+    be = DeadNetworkBackend(files_by_drive={"": files}, shared_drives=[],
+                            content={}, exports={})
+    res = run_backup(cfg, DriveClient(be), account="default", timestamp="CB", workers=4)
+    assert res.aborted            # breaker fired with a reason
+    assert res.errors < n         # queue NOT fully burned into errors
+    # And the run stays resumable: manifest saved, no corruption.
+    m = Manifest.load(cfg.backup_root / "CB/default/manifest.json")
+    assert not m.is_complete()[0]
+
+
 def test_permanent_failure_is_reported_not_infinite(cfg):
     files = [{"id": "v1", "name": "bad.MP4", "mimeType": "video/mp4", "parents": [],
               "size": "9", "modifiedTime": "2023-01-01T00:00:00Z",

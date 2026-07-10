@@ -39,6 +39,7 @@ class BackupResult:
     repaired: int = 0        # done files re-mirrored to a destination missing them
     imported: int = 0        # unchanged files copied locally from a previous backup
     restricted: int = 0      # files Drive permanently refuses to serve (view-only)
+    aborted: str = ""        # circuit-breaker reason when a systemic outage stopped the run
     bytes_written: int = 0
     error_samples: list[str] = field(default_factory=list)
 
@@ -126,6 +127,9 @@ _NET_ERRORS = (ConnectionError, TimeoutError, OSError, http.client.HTTPException
 # unmounted, permissions, read-only FS): fail fast instead of 4 retry cycles.
 _FATAL_ERRNOS = {errno.ENOSPC, errno.ENOENT, errno.EACCES, errno.EROFS, errno.EDQUOT}
 _FILE_ATTEMPTS = 4
+# Circuit breaker: this many CONSECUTIVE failures means a systemic outage
+# (network/DNS down, drive gone) -> abort early, resume when it's back.
+BREAKER_LIMIT = 60
 
 
 def _is_transient(e: BaseException) -> bool:
@@ -462,8 +466,12 @@ def _run_backup_locked(cfg: Config, client: DriveClient, account: str,
     log.info("Téléchargement de %d fichiers (%d déjà présents) avec %d workers parallèles...",
              len(pending), result.skipped, n_workers)
 
+    # Circuit breaker state (see module-level BREAKER_LIMIT).
+    consecutive_failures = 0
+
     # Phase 2 (parallel): download concurrently; the main thread updates the manifest.
     processed = 0
+    aborted_reason = None
     try:
       with ThreadPoolExecutor(max_workers=n_workers) as pool:
         futures = [pool.submit(_download_one, client, dests, rf, rel_path, inflight)
@@ -479,6 +487,7 @@ def _run_backup_locked(cfg: Config, client: DriveClient, account: str,
                 ))
                 result.downloaded += 1
                 result.bytes_written += size
+                consecutive_failures = 0
             elif err.startswith("restricted:"):
                 result.restricted += 1
                 manifest.upsert(Entry(
@@ -499,6 +508,16 @@ def _run_backup_locked(cfg: Config, client: DriveClient, account: str,
                     status="error", error=err,
                 ))
                 log.warning("Erreur sur %s: %s", rel_path, err)
+                consecutive_failures += 1
+                if consecutive_failures >= BREAKER_LIMIT:
+                    aborted_reason = (f"{consecutive_failures} échecs consécutifs "
+                                      f"(dernier: {err[:80]})")
+                    log.error("COUPE-CIRCUIT: panne systémique détectée (%s). "
+                              "Arrêt anticipé -- relance `backup` quand le "
+                              "réseau/disque est rétabli (reprise auto).", aborted_reason)
+                    for f in futures:
+                        f.cancel()
+                    break
 
             processed += 1
             if processed % save_every == 0:
@@ -524,6 +543,8 @@ def _run_backup_locked(cfg: Config, client: DriveClient, account: str,
         if dest != primary:
             dest.mkdir(parents=True, exist_ok=True)
             (dest / "manifest.json").write_bytes(manifest_path.read_bytes())
+    if aborted_reason:
+        result.aborted = aborted_reason
     complete, reason = manifest.is_complete()
     level = log.info if complete else log.warning
     level("Backup terminé: dl=%d skip=%d err=%d repair=%d complet=%s (%s) -> %s",
