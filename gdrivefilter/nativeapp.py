@@ -8,22 +8,13 @@ from __future__ import annotations
 
 import threading
 import time
-import urllib.request
 from http.server import ThreadingHTTPServer
 
 from .config import Config
-from .dashboard import make_handler
+from .dashboard import dashboard_up, make_handler
 from .logging_conf import get_logger
 
 log = get_logger("app")
-
-
-def _server_up(url: str) -> bool:
-    try:
-        urllib.request.urlopen(url, timeout=1)
-        return True
-    except Exception:  # noqa: BLE001 - any failure means "not reachable yet"
-        return False
 
 
 def run(cfg: Config, port: int = 8787, width: int = 1200, height: int = 820) -> None:
@@ -31,12 +22,12 @@ def run(cfg: Config, port: int = 8787, width: int = 1200, height: int = 820) -> 
 
     url = f"http://127.0.0.1:{port}/"
     httpd = None
-    if not _server_up(url):
+    if not dashboard_up(port):  # only start a server if OURS isn't already up
         # No dashboard running yet -> start one in-process (bound to loopback).
         httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(cfg))
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         for _ in range(40):
-            if _server_up(url):
+            if dashboard_up(port):
                 break
             time.sleep(0.25)
         log.info("Dashboard démarré sur %s", url)

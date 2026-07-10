@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import threading
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -303,9 +304,38 @@ def make_handler(cfg: Config):
     return Handler
 
 
+def dashboard_up(port: int = 8787) -> bool:
+    """True if OUR dashboard already answers on the port (not just any server)."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=1) as r:
+            return b'"accounts"' in r.read(300)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+class _Dashboard(ThreadingHTTPServer):
+    # Do NOT stack silently onto a busy port: a second launch should fail to bind
+    # (EADDRINUSE) rather than coexist and route requests unpredictably.
+    allow_reuse_address = False
+
+
 def serve(cfg: Config, port: int = 8787, open_browser: bool = True) -> None:
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(cfg))
     url = f"http://127.0.0.1:{port}/"
+    if dashboard_up(port):
+        log.info("Dashboard déjà actif sur %s -- pas de second serveur.", url)
+        if open_browser:
+            try:
+                import webbrowser
+                webbrowser.open(url)
+            except Exception:  # noqa: BLE001
+                pass
+        return
+    try:
+        httpd = _Dashboard(("127.0.0.1", port), make_handler(cfg))
+    except OSError as e:
+        log.error("Impossible de démarrer le dashboard sur %s (%s). "
+                  "Un autre programme occupe le port ?", url, e)
+        return
     log.info("Dashboard: %s  (Ctrl-C pour arrêter)", url)
     if open_browser:
         try:
