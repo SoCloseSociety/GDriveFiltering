@@ -21,7 +21,7 @@ A fast, resumable, read-only Google Drive backup and cleanup tool in Python, wit
 desktop app and a live local dashboard. Ideal for archiving a large Drive to an external disk,
 migrating accounts, or de-cluttering years of files — safely.
 
-![GDriveFiltering dashboard](docs/dashboard.svg)
+![GDriveFiltering dashboard](docs/dashboard.png)
 
 ---
 
