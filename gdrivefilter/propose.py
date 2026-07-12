@@ -107,7 +107,9 @@ def write_plan_csv(rows: list[dict], path: Path) -> None:
 
 
 def read_plan_csv(path: Path) -> list[dict]:
-    with open(path, newline="", encoding="utf-8") as f:
+    # utf-8-sig: Excel/editors prepend a BOM when saving; without this the first
+    # column becomes "﻿action" and every row loses its 'action' key.
+    with open(path, newline="", encoding="utf-8-sig") as f:
         return list(csv.DictReader(f))
 
 

@@ -103,7 +103,8 @@ def reorganize(source_dir: Path, dest_root: Path, manifest: Manifest,
     """
     source_dir = Path(source_dir).resolve()
     dest_root = Path(dest_root).resolve()
-    if dest_root == source_dir or source_dir in dest_root.parents:
+    if (dest_root == source_dir or source_dir in dest_root.parents
+            or dest_root in source_dir.parents):
         raise ValueError("La destination de réorg doit être HORS du miroir source (sécurité).")
 
     plan_by_src: dict[str, dict] | None = None
@@ -114,12 +115,14 @@ def reorganize(source_dir: Path, dest_root: Path, manifest: Manifest,
             if action not in ("keep", "quarantine", "skip"):
                 raise ValueError(f"Action de plan inconnue: {action!r} "
                                  "(attendu: keep | quarantine | skip)")
+            row["action"] = action  # route on the NORMALIZED value ('Skip ' -> 'skip')
             plan_by_src[row.get("src_rel", "")] = row
 
     dup_rel = {p for g in (dedup.groups if dedup else []) for p in g.duplicates}
     junk = junk or {}
     report = ReorgReport(dest_root)
     taken: set[str] = set()
+    unplanned = 0
 
     for e in manifest.done_entries():
         src = source_dir / e.rel_path
@@ -128,16 +131,25 @@ def reorganize(source_dir: Path, dest_root: Path, manifest: Manifest,
         name = Path(e.rel_path).name
         if plan_by_src is not None:
             row = plan_by_src.get(e.rel_path)
-            if row is None or row["action"] == "skip":
+            if row is None:
+                unplanned += 1  # not in the edited plan -> not copied (counted, not silent)
+                continue
+            if row["action"] == "skip":
                 continue  # user chose to leave this file out of the clean tree
             wanted = _safe_plan_dest(row.get("dest_rel") or _dest_rel(e, by_year))
+            in_quarantine = wanted == "_quarantine" or wanted.startswith("_quarantine/")
             if row["action"] == "quarantine":
-                if not wanted.startswith("_quarantine/"):
+                if not in_quarantine:
                     wanted = f"_quarantine/{wanted}"
                 rel = _unique(dest_root, wanted, e.sha256, taken)
-                report.quarantined_dup += 1
+                if "_quarantine/junk" in wanted:
+                    report.quarantined_junk += 1
+                else:
+                    report.quarantined_dup += 1
                 report.bytes_quarantined += e.size
-            else:  # keep
+            else:  # keep -- must NEVER land under _quarantine/ (purge would delete it)
+                if in_quarantine:
+                    wanted = f"Kept/{name}"
                 rel = _unique(dest_root, wanted, e.sha256, taken)
                 report.copied += 1
                 report.bytes_copied += e.size
@@ -156,9 +168,15 @@ def reorganize(source_dir: Path, dest_root: Path, manifest: Manifest,
         report.mapping.append((e.rel_path, rel))
         if not dry_run:
             target = dest_root / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, target)
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, target)
+            except (OSError, shutil.Error) as ex:  # a bad plan row must not abort the whole run
+                log.warning("Copie échouée %s -> %s: %s", e.rel_path, rel, ex)
 
+    if plan_by_src is not None and unplanned:
+        log.warning("%d fichier(s) du manifest absents du plan -> NON copiés "
+                    "(source intacte, mais vérifie ton plan.csv).", unplanned)
     log.info("Réorg %s: %d copiés, %d doublons + %d junk en quarantaine, %.2f Go utiles%s",
              "(dry-run) " if dry_run else "", report.copied, report.quarantined_dup,
              report.quarantined_junk, report.bytes_copied / (1024**3),
